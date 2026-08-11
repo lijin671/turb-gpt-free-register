@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import random
+import secrets
+import string
 from datetime import date, timedelta
 
 
@@ -30,3 +32,33 @@ def generate_random_birthday(min_age: int = 18, max_age: int = 65) -> str:
     span_days = (youngest - oldest).days
     birthday = oldest + timedelta(days=random.randint(0, span_days))
     return birthday.isoformat()
+
+
+def generate_random_password(length: int = 14) -> str:
+    """生成满足 OpenAI 密码要求的随机密码（大小写+数字+符号，长度可调）。"""
+    upper = string.ascii_uppercase
+    lower = string.ascii_lowercase
+    digits = string.digits
+    symbols = "!@#$%^&*"
+    chars = [
+        secrets.choice(upper),
+        secrets.choice(lower),
+        secrets.choice(digits),
+        secrets.choice(symbols),
+    ]
+    pool = upper + lower + digits + symbols
+    chars.extend(secrets.choice(pool) for _ in range(max(0, length - len(chars))))
+    random.shuffle(chars)
+    return "".join(chars)
+
+
+def registration_password() -> str:
+    """注册用密码：优先取 config.register.REGISTER_PASSWORD，否则随机生成。"""
+    try:
+        from config import register as _register_cfg
+        configured = str(getattr(_register_cfg, "REGISTER_PASSWORD", "") or "").strip()
+        if configured:
+            return configured
+    except Exception:
+        pass
+    return generate_random_password()

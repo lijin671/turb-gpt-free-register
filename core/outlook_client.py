@@ -27,6 +27,9 @@ import imaplib
 import json
 import logging
 import os
+import random
+import re
+import string
 import threading
 import time
 from dataclasses import dataclass
@@ -46,7 +49,7 @@ from config import (
 )
 # OTP_POLL_INTERVAL / OTP_MAX_WAIT 是 WebUI 可热改的，从模块读
 from config import email as _email_cfg
-from core.otp_utils import looks_like_openai_email, extract_otp
+from core.otp_utils import extract_otp, looks_like_openai_email, rejected_otp_codes
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +62,12 @@ _CONTEXT_CACHE: dict[str, "OutlookAccount"] = {}
 _REMOTE_DISABLED = False
 _MS_TOKEN_CACHE: dict[str, tuple[str, float]] = {}
 _MS_TOKEN_FATAL_CACHE: dict[str, tuple[str, float]] = {}
+
+# Graph Explorer 公共 SPA client：刷新必须带 redirect_uri（与授权时一致）+
+# Origin 头，否则 AADSTS90023（2026-08-09 outlook-register-loop 实测结论）。
+GRAPH_EXPLORER_CLIENT = "de8bc8b5-d9f9-48b1-a8ad-b748da725064"
+GRAPH_EXPLORER_REDIRECT = "https://developer.microsoft.com/en-us/graph/graph-explorer"
+GRAPH_EXPLORER_ORIGIN = "https://developer.microsoft.com"
 
 
 @dataclass
@@ -249,6 +258,52 @@ def _parse_accounts_file(path: Path) -> list[OutlookAccount]:
 # 公共接口：挑账号 / 取 OTP（统一走 DB）
 # ============================================================
 
+def _alias_enabled() -> bool:
+    return bool(getattr(_email_cfg, "OUTLOOK_ALIAS", True))
+
+
+def make_outlook_alias(email: str, tag: str | None = None) -> str:
+    """生成 base+tag@domain 别名（幂等：已带 +tag 时替换为新 tag）。
+
+    Microsoft 的 + 别名会落到同一收件箱（Graph/IMAP 均按收件箱返回邮件），
+    因此同一 base 账号可以产出多个互不相同的注册邮箱。
+    """
+    email = (email or "").strip().lower()
+    if not email or "@" not in email:
+        return email
+    local, _, domain = email.partition("@")
+    local = local.split("+", 1)[0]
+    if not tag:
+        tag = "".join(random.choices(string.ascii_lowercase + string.digits, k=10))
+    tag = re.sub(r"[^a-zA-Z0-9_.-]", "", str(tag))[:32] or "x"
+    return f"{local}+{tag}@{domain}"
+
+
+def resolve_base_email(email: str) -> str:
+    """去掉 +tag 别名，返回真实收件箱地址；未带别名时原样返回。"""
+    email = (email or "").strip()
+    if not email or "@" not in email:
+        return email
+    local, _, domain = email.partition("@")
+    return f"{local.split('+', 1)[0]}@{domain}"
+
+
+def acquire_email() -> str:
+    """领取一个 Outlook 邮箱用于注册；开启别名时返回 base+tag 别名。
+
+    别名与 base 收件箱的映射缓存在 _CONTEXT_CACHE 中，fetch_latest_otp(别名)
+    会自动解析回 base 收件箱取 OTP。
+    """
+    account = pick_account()
+    email = account.email
+    if not _alias_enabled():
+        return email
+    alias = make_outlook_alias(email)
+    _CONTEXT_CACHE[alias] = account
+    logger.info(f"[Outlook] 生成别名邮箱: {alias}（收件箱 {email}）")
+    return alias
+
+
 def pick_account() -> OutlookAccount:
     """
     原子地挑一个 status='available' 的 Outlook 账号并标记为 'used'（DB 事务）。
@@ -280,11 +335,18 @@ def pick_account() -> OutlookAccount:
 
 
 def get_account_context(email: str) -> OutlookAccount | None:
-    """根据邮箱查 OutlookAccount 上下文。优先内存缓存，fallback 查 DB。"""
-    if email in _CONTEXT_CACHE:
-        return _CONTEXT_CACHE[email]
+    """根据邮箱查 OutlookAccount 上下文。优先内存缓存，fallback 查 DB。
+
+    支持 +tag 别名：先解析为收件箱地址，再按 base 查缓存/DB。
+    """
+    alias = (email or "").strip()
+    base = resolve_base_email(alias)
+    if alias != base and alias not in _CONTEXT_CACHE and base in _CONTEXT_CACHE:
+        _CONTEXT_CACHE[alias] = _CONTEXT_CACHE[base]
+    if alias in _CONTEXT_CACHE:
+        return _CONTEXT_CACHE[alias]
     from core.db import get_outlook_by_email
-    row = get_outlook_by_email(email)
+    row = get_outlook_by_email(base)
     if row is None:
         return None
     account = OutlookAccount(
@@ -293,14 +355,38 @@ def get_account_context(email: str) -> OutlookAccount | None:
         client_id=row["client_id"],
         refresh_token=row["refresh_token"],
     )
-    _CONTEXT_CACHE[email] = account
+    _CONTEXT_CACHE[alias] = account
     return account
 
 
+def maybe_release_outlook_for_alias_reuse(email: str) -> None:
+    """注册成功后调用：仅当 OUTLOOK_ALIAS + OUTLOOK_ALIAS_REUSE_ON_SUCCESS 均开启，
+    且邮箱来自 Outlook 池时，把 base 收件箱放回 available，供下一次别名继续使用。
+
+    失败只记录日志，不影响注册结果。
+    """
+    if not _alias_enabled():
+        return
+    if not bool(getattr(_email_cfg, "OUTLOOK_ALIAS_REUSE_ON_SUCCESS", False)):
+        return
+    try:
+        from core.email_provider import release_email, resolve_email_source
+        if resolve_email_source(email) != "outlook":
+            return
+        release_email(email, status="available", note="注册成功，别名复用")
+        logger.info(f"[Outlook] 别名复用：{email} 的收件箱已放回 available")
+    except Exception as exc:
+        logger.warning(f"[Outlook] 别名复用失败（不影响注册结果）: {exc}")
+
+
 def release_account(email: str, status: str = "available", note: str | None = None) -> None:
-    """按注册阶段结果更新 Outlook 账号状态：可重试回 available，已消耗则标记 failed。"""
+    """按注册阶段结果更新 Outlook 账号状态：可重试回 available，已消耗则标记 failed。
+
+    传入别名时自动解析回 base 收件箱地址再更新 DB 状态。
+    """
     from core.db import release_outlook
-    release_outlook(email, status=status, note=note)
+    base = resolve_base_email(email)
+    release_outlook(base, status=status, note=note)
     _CONTEXT_CACHE.pop(email, None)
 
 
@@ -349,6 +435,14 @@ def _outlook_fetch_mode() -> str:
 def _is_remote_disabled_error(exc: Exception | str) -> bool:
     text = str(exc or "")
     return "DEPLOYMENT_DISABLED" in text or "HTTP 402" in text or "Payment required" in text
+
+
+def _is_spa_oauth_error(text: str) -> bool:
+    s = str(text or "")
+    return any(k in s for k in (
+        "AADSTS90023", "invalid_grant", "AADSTS70000",
+        "AADSTS65001", "unauthorized or expired",
+    ))
 
 
 def _ms_http() -> CurlSession:
@@ -559,10 +653,16 @@ def _ms_access_token(
             attempts = [item for item in attempts if item[0] == preferred_kind]
         last_text = ""
         for kind, url, payload in attempts:
+            headers = {"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"}
+            data_payload = dict(payload)
+            if account.client_id == GRAPH_EXPLORER_CLIENT:
+                headers["Origin"] = GRAPH_EXPLORER_ORIGIN
+                if "/v2.0/" in url:
+                    data_payload["redirect_uri"] = GRAPH_EXPLORER_REDIRECT
             resp = http.post(
                 url,
-                headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
-                data=urlencode(payload),
+                headers=headers,
+                data=urlencode(data_payload),
             )
             text = resp.text or ""
             last_text = text[:500]
@@ -574,6 +674,16 @@ def _ms_access_token(
             if resp.status_code == 200 and isinstance(data, dict) and data.get("access_token"):
                 expires_in = int(data.get("expires_in") or 3600)
                 token = str(data["access_token"])
+                # SPA RT 每次刷新会轮换：写回 DB/TXT，否则旧 RT 下次刷新 400
+                new_rt = data.get("refresh_token")
+                if new_rt and new_rt != account.refresh_token:
+                    try:
+                        from core.db import update_outlook_refresh_token
+                        if update_outlook_refresh_token(account.email, str(new_rt)):
+                            account.refresh_token = str(new_rt)
+                            logger.info("[Outlook] %s refresh_token 已轮换写回", account.email)
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning("[Outlook] refresh_token 写回失败: %s", e)
                 # Microsoft Graph 对个人 Outlook/MSA 账号可能返回 opaque access_token，
                 # 不一定是 JWT；Graph 仍然接受。不能用是否包含 "." 判断是否可用。
                 _MS_TOKEN_CACHE[cache_key] = (f"{kind}:{token}", now + max(300, expires_in - 60))
@@ -889,7 +999,19 @@ def _fetch_via(session: CurlSession, protocol: str, account: OutlookAccount) -> 
         return []
 
     if not data.get("success"):
-        logger.debug(f"[Outlook] {protocol} success=False: {data.get('error')}")
+        err = str(data.get("error") or "")
+        logger.debug(f"[Outlook] {protocol} success=False: {err}")
+        # 远端服务无法兑现 SPA refresh_token（AADSTS90023 等）时，等同远端不可用，
+        # 自动切换为本地直连，避免 success=False 被静默吞掉导致永远取不到 OTP。
+        if mode == "auto" and _is_spa_oauth_error(err):
+            _REMOTE_DISABLED = True
+            logger.warning(
+                f"[Outlook] 远端取件服务 OAuth 失败（{err[:120]}），自动切换为 Microsoft Graph 直连模式"
+            )
+            if protocol == "graph":
+                return _fetch_via_graph_direct(account)
+            if protocol == "imap":
+                return _fetch_imap_direct_messages(account)
         return []
 
     emails = data.get("emails") or []
@@ -998,7 +1120,7 @@ def fetch_latest_otp(
                 date = item.get("date") or item.get("receivedDateTime") or ""
                 is_openai = looks_like_openai_email(item)
                 after_ok = True if after_ts is None else _is_after(item, after_ts)
-                otp = extract_otp(item)
+                otp = extract_otp(item, exclude_codes=rejected_otp_codes(email))
                 diag.append({
                     "p": source,
                     "date": date,
@@ -1024,7 +1146,7 @@ def fetch_latest_otp(
             if after_ts is not None and not _is_after(item, after_ts):
                 continue
 
-            otp = extract_otp(item)
+            otp = extract_otp(item, exclude_codes=rejected_otp_codes(email))
             if not otp:
                 continue
 
@@ -1082,9 +1204,9 @@ def fetch_latest_otp(
     )
 
 
-# 时差容忍：只保留极小容忍。
-# 重发 OTP 时上一封旧码常常只早 10~20 秒；若容忍 30 秒，会把上一轮旧码误判为新码。
-_OTP_CLOCK_SKEW_TOLERANCE = 2
+# 时差容忍：仅 30 秒（足以吸收客户端/邮件服务器 NTP 偏差）。
+# 不能像之前那样放 5 分钟——OTP 30 秒就轮换一次，旧 OTP 会被误判通过。
+_OTP_CLOCK_SKEW_TOLERANCE = 30
 
 
 def _parse_email_ts(item: dict) -> float | None:

@@ -10,15 +10,17 @@ EMAIL_SOURCE 支持单个或多个来源：
     "gptmail"
     "mailnest"
     "cloudmail"
-    "outlook,generic_api,mailnest,cloudmail"          # 按顺序兜底
-    ["outlook", "generic_api", "mailnest", "cloudmail"]  # 也兼容列表写法
+    "manymail"          # 自建 ManyMail（DuckMail 兼容），建议放最后作保底
+    "outlook,generic_api,mailnest,cloudmail,manymail"  # 按顺序兜底
+    ["outlook", "generic_api", "mailnest", "cloudmail", "manymail"]
 """
+import json
 import logging
 from typing import Iterable
 
 logger = logging.getLogger(__name__)
 
-_VALID_SOURCES = ("outlook", "generic_api", "cloudflare_domain", "cloudflare", "gptmail", "mailnest", "cloudmail")
+_VALID_SOURCES = ("outlook", "generic_api", "cloudflare_domain", "cloudflare", "gptmail", "mailnest", "cloudmail", "manymail", "mailtm", "icloud")
 
 
 def parse_email_sources(value=None) -> list[str]:
@@ -65,8 +67,17 @@ def _pick_from_source(source: str) -> str:
     if source == "cloudmail":
         from core.cloudmail_client import pick_account
         return pick_account().email
-    from core.outlook_client import pick_account
-    return pick_account().email
+    if source == "manymail":
+        from core.manymail_client import pick_account
+        return pick_account().email
+    if source == "mailtm":
+        from core.mailtm_client import pick_account
+        return pick_account().email
+    if source == "icloud":
+        from core.icloud_client import pick_account
+        return pick_account().email
+    from core.outlook_client import acquire_email
+    return acquire_email()
 
 
 def acquire_email() -> str:
@@ -87,6 +98,28 @@ def acquire_email() -> str:
 
 def resolve_email_source(email: str) -> str:
     """根据邮箱在各池中的归属判断实际来源。"""
+    # manymail 上下文只在注册进程内存；独立进程（查活/取码）先从账号记录恢复
+    try:
+        from core.manymail_client import get_account_context as _get_mm_ctx, restore_context as _restore_mm_ctx
+        if not _get_mm_ctx(email):
+            from core import db as _db
+            _acc = _db.get_account_by_email(email) or {}
+            _extra = _acc.get("extra")
+            if not isinstance(_extra, dict):
+                try:
+                    _extra = json.loads(_acc.get("extra_json") or "{}") or {}
+                except Exception:
+                    _extra = {}
+            _mm = _extra.get("manymail") if isinstance(_extra, dict) else None
+            if isinstance(_mm, dict) and _mm.get("password"):
+                _restore_mm_ctx(
+                    email,
+                    str(_mm["password"]),
+                    token=str(_mm.get("token") or ""),
+                    domain=str(_mm.get("domain") or ""),
+                )
+    except Exception as _exc:
+        logger.debug("[邮箱来源] manymail 上下文恢复跳过: %s", _exc)
     from core.gptmail_client import get_account_context as get_gptmail_context
     if get_gptmail_context(email):
         return "gptmail"
@@ -99,11 +132,21 @@ def resolve_email_source(email: str) -> str:
     from core.cloudmail_client import get_account_context as get_cloudmail_context
     if get_cloudmail_context(email):
         return "cloudmail"
+    from core.manymail_client import get_account_context as get_manymail_context
+    if get_manymail_context(email):
+        return "manymail"
+    from core.icloud_client import get_account_context as get_icloud_context
+    if get_icloud_context(email):
+        return "icloud"
+    from core.mailtm_client import get_account_context as get_mailtm_context
+    if get_mailtm_context(email):
+        return "mailtm"
 
     from core import db
     if db.get_generic_api_email_by_email(email):
         return "generic_api"
-    if db.get_outlook_by_email(email):
+    from core.outlook_client import resolve_base_email
+    if db.get_outlook_by_email(resolve_base_email(email)):
         return "outlook"
     if db._find_domain_email(db._load_domain_pool(), email):  # 内部轻量查询，仅本项目使用
         return "cloudflare_domain"
@@ -161,8 +204,8 @@ def wait_for_otp(
         from core.gptmail_client import fetch_latest_otp
         return fetch_latest_otp(email, after_ts=after_ts, **extra_kwargs)
     if source == "cloudflare":
-        from core.cf_temp_mail_client import fetch_latest_otp
-        return fetch_latest_otp(email, after_ts=after_ts, **extra_kwargs)
+        from core.cf_temp_mail_client import fetch_latest_otp_enhanced as _fetch
+        return _fetch(email, after_ts=after_ts, **extra_kwargs)
     if source == "cloudflare_domain":
         from core.qqmail_client import fetch_latest_otp
         return fetch_latest_otp(email, after_ts=after_ts, **extra_kwargs)
@@ -174,6 +217,15 @@ def wait_for_otp(
         return fetch_latest_otp(email, after_ts=after_ts, **extra_kwargs)
     if source == "cloudmail":
         from core.cloudmail_client import fetch_latest_otp
+        return fetch_latest_otp(email, after_ts=after_ts, **extra_kwargs)
+    if source == "manymail":
+        from core.manymail_client import fetch_latest_otp
+        return fetch_latest_otp(email, after_ts=after_ts, **extra_kwargs)
+    if source == "mailtm":
+        from core.mailtm_client import fetch_latest_otp
+        return fetch_latest_otp(email, after_ts=after_ts, **extra_kwargs)
+    if source == "icloud":
+        from core.icloud_client import fetch_latest_otp
         return fetch_latest_otp(email, after_ts=after_ts, **extra_kwargs)
     from core.outlook_client import fetch_latest_otp
     return fetch_latest_otp(email, after_ts=after_ts, **extra_kwargs)
@@ -200,6 +252,15 @@ def release_email(email: str, status: str = "available", note: str | None = None
     elif source == "cloudmail":
         from core.cloudmail_client import release_account
         release_account(email, status=status, note=note)
+    elif source == "manymail":
+        from core.manymail_client import release_account
+        release_account(email, status=status, note=note)
+    elif source == "mailtm":
+        from core.mailtm_client import release_account
+        release_account(email, status=status, note=note)
+    elif source == "icloud":
+        from core.icloud_client import release_account
+        release_account(email, status=status, note=note)
     else:
         from core.outlook_client import release_account
         release_account(email, status=status, note=note)
@@ -215,11 +276,18 @@ def release_email_if_unconsumed(email: str, note: str | None = None) -> bool:
     from core import db
 
     if source == "outlook":
-        changed = db.release_unconsumed_outlook(email, note=note)
+        from core.outlook_client import resolve_base_email
+        changed = db.release_unconsumed_outlook(resolve_base_email(email), note=note)
     elif source == "generic_api":
         changed = db.release_unconsumed_generic_api_email(email, note=note)
     elif source == "cloudflare_domain":
         changed = db.release_unconsumed_domain_email(email, note=note)
+    elif source == "icloud":
+        from core.icloud_client import release_account
+        if db.get_account_by_email(email) is not None:
+            return False
+        release_account(email, status="available", note=note)
+        changed = True
     else:
         # 临时邮箱不重新进入本地池，只清理进程上下文；已有本地账号时保留上下文。
         if db.get_account_by_email(email) is not None:

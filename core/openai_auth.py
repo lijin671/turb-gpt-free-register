@@ -2,18 +2,20 @@
 """
 OpenAI Auth 模块
 处理 auth.openai.com 域名下的注册请求（步骤4-5、7-8、10、12）
-以及 sentinel.openai.com 的 sentinel token 请求（步骤6、9、11）
+以及 sentinel token 请求（步骤6、9、11，端点在 config.openai_protocol.SENTINEL_REQ_URL）
 """
 import json
 import logging
 import time
 
+from config import SENTINEL_REQ_ORIGIN, SENTINEL_REQ_URL
 from core.session import BrowserSession
 from core.sentinel import (
     generate_requirements_token,
     build_sentinel_request_body,
 )
 from core.sentinel_runner import generate_sentinel_token
+from core.sentinel_sdk import current_sentinel_sv, ensure_sentinel_sdk
 
 logger = logging.getLogger(__name__)
 
@@ -62,9 +64,13 @@ _ACCOUNT_DEAD_TEXT_MARKERS = (
     "账号已停用",
     "账号已禁用",
     "账号已删除",
+    "账号已废",
+    "账号已废弃",
     "账户已停用",
     "账户已禁用",
     "账户已删除",
+    "账户已废",
+    "账户已废弃",
 )
 
 
@@ -161,8 +167,8 @@ def network_preflight(session: BrowserSession) -> None:
             allow_redirects=True,
         )),
         ("sentinel-frame", lambda: session.get(
-            "https://sentinel.openai.com/backend-api/sentinel/frame.html?sv=" + __import__("config", fromlist=["SENTINEL_SV"]).SENTINEL_SV,
-            headers=session.get_auth_navigate_headers(referer="https://auth.openai.com/log-in", target_origin="https://sentinel.openai.com"),
+            f"{SENTINEL_REQ_ORIGIN}/backend-api/sentinel/frame.html?sv={current_sentinel_sv(session=session)}",
+            headers=session.get_auth_navigate_headers(referer="https://auth.openai.com/log-in", target_origin=SENTINEL_REQ_ORIGIN),
             allow_redirects=True,
         )),
     ]
@@ -186,6 +192,47 @@ def network_preflight(session: BrowserSession) -> None:
             raise last_exc if last_exc else RuntimeError(f"[预检] {label} 未完成")
 
 
+def is_password_branch_url(url: str) -> bool:
+    """
+    判断 authorize 重定向是否落入"密码注册分支"。
+
+    OpenAI A/B 分流：新邮箱可能被路由到 /create-account/password
+    （需要先设密码再收 OTP），而不是默认的 /email-verification 直接收码。
+    """
+    value = str(url or "")
+    return "/create-account/password" in value or "/api/accounts/user/register" in value
+
+
+def register_user(session: BrowserSession, email: str, password: str, sentinel_header: str, so_header: str = None) -> dict:
+    """
+    密码注册分支：设置账号密码。
+    POST https://auth.openai.com/api/accounts/user/register
+    body: {"username": email, "password": password}
+
+    参考 sleep-reg gpt_register.py 的 password 分支实现。
+    """
+    url = "https://auth.openai.com/api/accounts/user/register"
+    headers = session.get_auth_headers(referer="https://auth.openai.com/create-account/password")
+    headers["openai-sentinel-token"] = sentinel_header
+    if so_header:
+        headers["openai-sentinel-so-token"] = so_header
+    body = json.dumps({"username": email, "password": password})
+
+    logger.info(f"[密码分支] 提交账号密码: {email}")
+    resp = session.post(url, headers=headers, data=body)
+    if resp.status_code != 200:
+        err_code = _extract_error_code(resp)
+        if err_code in _ACCOUNT_DEAD_CODES:
+            raise AccountUnusableError(
+                f"账号已废弃（{err_code}），邮箱不可再用", error_code=err_code,
+            )
+        logger.error(f"[密码分支] user/register 失败 status={resp.status_code}: {(resp.text or '')[:300]}")
+        resp.raise_for_status()
+    data = resp.json() if resp.text else {}
+    logger.info(f"[密码分支] user/register 成功: {email}")
+    return data
+
+
 def follow_authorize(session: BrowserSession, authorize_url: str) -> str:
     """
     步骤4: 跟随 authorize URL 重定向。
@@ -207,9 +254,10 @@ def follow_authorize(session: BrowserSession, authorize_url: str) -> str:
             resp = session.get(authorize_url, headers=headers, allow_redirects=True)
             resp.raise_for_status()
             final_url = str(getattr(resp, "url", "") or "")
-            if "/api/accounts/user/register" in final_url or "/create-account/password" in final_url:
-                raise RuntimeError(f"[步骤4] 落入旧密码注册路径，已拒绝继续烧邮箱: {final_url}")
-            logger.info(f"[步骤4] 重定向完成, 最终URL: {final_url}")
+            if is_password_branch_url(final_url):
+                logger.info(f"[步骤4] 落入密码注册分支（create-account/password），后续走 user/register: {final_url}")
+            else:
+                logger.info(f"[步骤4] 重定向完成, 最终URL: {final_url}")
             return final_url
         except Exception as exc:
             last_exc = exc
@@ -232,7 +280,8 @@ def follow_authorize(session: BrowserSession, authorize_url: str) -> str:
 def request_sentinel_token(session: BrowserSession, flow: str) -> dict:
     """
     步骤6/9/11: 请求 Sentinel Token。
-    POST https://sentinel.openai.com/backend-api/sentinel/req
+    POST config.openai_protocol.SENTINEL_REQ_URL（默认 sentinel.openai.com，
+    可通过 SENTINEL_REQ_ORIGIN 覆盖为 chatgpt.com 等）。
 
     Args:
         session: 浏览器会话
@@ -244,10 +293,20 @@ def request_sentinel_token(session: BrowserSession, flow: str) -> dict:
     Returns:
         sentinel 响应 JSON，包含 token、turnstile、proofofwork 等
     """
-    url = "https://sentinel.openai.com/backend-api/sentinel/req"
+    url = SENTINEL_REQ_URL
 
-    # 生成 p 字段（浏览器指纹）
-    p = generate_requirements_token(getattr(session, "sentinel_sid", session.device_id), profile=getattr(session, "browser_profile", None))
+    # SDK 版本自动发现：优先使用最新版 sdk.js；session.sentinel_sv 供
+    # get_sentinel_headers 的 frame.html?sv= 与 runner --script-src 保持一致。
+    _sdk_path, sdk_sv, sdk_script_src = ensure_sentinel_sdk(session=session)
+    session.sentinel_sv = sdk_sv
+    session.sentinel_script_src = sdk_script_src
+
+    # 生成 p 字段（浏览器指纹），script_src 样本与 runner 实际使用的 SDK 版本对齐
+    profile = dict(getattr(session, "browser_profile", None) or {})
+    profile["script_src_samples"] = [sdk_script_src]
+    p = generate_requirements_token(getattr(session, "sentinel_sid", session.device_id), profile=profile)
+    # 记录本次 req 使用的 requirements token，供 Node runner 失败时纯 Python 降级解 turnstile
+    session.sentinel_req_p = p
 
     # 构建请求体
     body = build_sentinel_request_body(p, session.device_id, flow)
@@ -298,18 +357,24 @@ def build_sentinel_header(session: BrowserSession, sentinel_resp: dict, flow: st
     """
     from config import USER_AGENT
 
-    header_value = generate_sentinel_token(
-        challenge=sentinel_resp,
-        flow=flow,
-        device_id=session.device_id,
-        user_agent=(getattr(session, "browser_profile", {}) or {}).get("user_agent") or USER_AGENT,
-        browser_profile=getattr(session, "browser_profile", None),
-        sentinel_sid=getattr(session, "sentinel_sid", None),
-        react_listening_key=getattr(session, "react_listening_key", None),
-        react_container_key=getattr(session, "react_container_key", None),
-        react_resources_key=getattr(session, "react_resources_key", None),
-        cookie=session.auth_cookie_header() if hasattr(session, "auth_cookie_header") else f"oai-did={session.device_id}",
-    )
+    try:
+        header_value = generate_sentinel_token(
+            challenge=sentinel_resp,
+            flow=flow,
+            device_id=session.device_id,
+            user_agent=(getattr(session, "browser_profile", {}) or {}).get("user_agent") or USER_AGENT,
+            browser_profile=getattr(session, "browser_profile", None),
+            sentinel_sid=getattr(session, "sentinel_sid", None),
+            react_listening_key=getattr(session, "react_listening_key", None),
+            react_container_key=getattr(session, "react_container_key", None),
+            react_resources_key=getattr(session, "react_resources_key", None),
+            cookie=session.auth_cookie_header() if hasattr(session, "auth_cookie_header") else f"oai-did={session.device_id}",
+        )
+    except Exception as exc:
+        # Node VM 不可用/失败时降级：纯 Python 算 PoW + turnstile（SO 留空）。
+        # 生产优先走官方 SDK；这里保证流程不因缺 Node 直接中断。
+        logger.warning(f"[Sentinel] Node runner 失败({exc})，降级纯 Python 构建 sentinel token")
+        return _build_sentinel_header_python(session, sentinel_resp, flow)
 
     # 解析 runner 输出，单独抽出 so 字段填充 openai-sentinel-so-token
     so_header = None
@@ -331,6 +396,91 @@ def build_sentinel_header(session: BrowserSession, sentinel_resp: dict, flow: st
         logger.warning(f"[Sentinel] runner 输出解析失败: {exc}")
 
     return header_value, so_header
+
+
+SENTINEL_TURNSTILE_FAIL_MARKER = "sentinel_turnstile_token_failed"
+
+
+def request_sentinel_header_with_retry(
+    session: BrowserSession,
+    flow: str,
+    attempts: int = 2,
+) -> tuple:
+    """请求 sentinel token 并构建请求头；纯 Python turnstile 求解失败时自动重试。
+
+    每次重试都会重新请求 /req（拿到新的 challenge/dx），多数 turnstile 求解失败是
+    瞬态（dx 与当次 requirements token 绑定），重试一次即可恢复；非 turnstile 错误
+    直接抛出不重试，避免掩盖真实原因。
+
+    Args:
+        session: 浏览器会话
+        flow: sentinel flow（"username_password_create" / "authorize_continue" / "oauth_create_account"）
+        attempts: 最大尝试次数（默认 2）
+
+    Returns:
+        (sentinel_header, so_header) 元组
+    """
+    attempts = max(1, int(attempts))
+    last_exc: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            sentinel_resp = request_sentinel_token(session, flow)
+            return build_sentinel_header(session, sentinel_resp, flow)
+        except Exception as exc:
+            last_exc = exc
+            text = str(exc)
+            if SENTINEL_TURNSTILE_FAIL_MARKER not in text or attempt >= attempts:
+                raise
+            logger.warning(
+                f"[Sentinel] turnstile 求解失败（{text[:140]}），"
+                f"重新请求 challenge 重试（{attempt + 1}/{attempts}）"
+            )
+    raise last_exc if last_exc is not None else RuntimeError("sentinel retry exhausted")
+
+
+def _build_sentinel_header_python(session: BrowserSession, sentinel_resp: dict, flow: str) -> tuple:
+    """
+    纯 Python 降级路径：不依赖 Node / sdk.js，用本地算法计算 sentinel token。
+
+    - PoW：core.sentinel.solve_proof_of_work（FNV-1a + nonce 爆破）
+    - turnstile：core.turnstile_solver.solve_turnstile_token（纯 Python 模拟 JS VM）
+    - SO token：无官方 Session Observer VM 时无法生成，保守留空
+
+    注意：这是兜底方案，token 可能被服务端风控拒绝；日志会标记降级来源。
+    """
+    from core import sentinel as _sentinel
+    from core.turnstile_solver import solve_turnstile_token as _solve_turnstile
+
+    device_id = session.device_id
+    sid = getattr(session, "sentinel_sid", None) or device_id
+    profile = getattr(session, "browser_profile", None) or {}
+    req_p = str(getattr(session, "sentinel_req_p", "") or "")
+
+    pow_data = sentinel_resp.get("proofofwork") or {}
+    if pow_data.get("required") and pow_data.get("seed"):
+        answer = _sentinel.solve_proof_of_work(
+            str(pow_data.get("seed") or ""),
+            str(pow_data.get("difficulty") or "0"),
+            sid,
+            profile=profile,
+        )
+        p_value = "gAAAAAB" + answer
+    else:
+        p_value = _sentinel.generate_requirements_token(sid, profile=profile)
+
+    t_value = ""
+    turnstile_data = sentinel_resp.get("turnstile") or {}
+    if turnstile_data.get("required") and turnstile_data.get("dx"):
+        t_value = _solve_turnstile(str(turnstile_data.get("dx") or ""), req_p) or ""
+        if not t_value:
+            raise RuntimeError("sentinel_turnstile_token_failed（纯Python降级）")
+
+    header_value = json.dumps(
+        {"p": p_value, "t": t_value, "c": sentinel_resp.get("token", ""), "id": device_id, "flow": flow},
+        separators=(',', ':'),
+    )
+    logger.warning("[Sentinel] 已使用纯 Python 降级路径构建 token（flow=%s, turnstile=%s）", flow, bool(t_value))
+    return header_value, None
 
 
 # ============================================================
@@ -425,12 +575,28 @@ def navigate_about_you(session: BrowserSession, about_url: str | None = None) ->
     return final_url
 
 
-def send_email_otp(session: BrowserSession, referer: str = "https://auth.openai.com/email-verification") -> None:
-    """重新发送邮箱验证码。用于验证码错误/过期后重新取码。"""
+def send_email_otp(
+    session: BrowserSession,
+    referer: str = "https://auth.openai.com/email-verification",
+    sentinel_header: str | None = None,
+    so_header: str | None = None,
+) -> None:
+    """重新发送邮箱验证码。用于验证码错误/过期后重新取码。
+
+    参考 sleep-reg gpt_register.py::_send_otp：重新发送时可携带
+    openai-sentinel-token / openai-sentinel-so-token（复用 authorize_continue
+    阶段的 token 或新 mint 均可）。本地默认不带（HAR 对齐），由
+    SEND_SENTINEL_ON_EMAIL_OTP_SEND 开关开启 A/B。
+    """
     url = "https://auth.openai.com/api/accounts/email-otp/send"
     headers = session.get_auth_navigate_headers(referer=referer)
     headers["sec-fetch-site"] = "same-origin"
     headers["sec-fetch-user"] = "?1"
+    if sentinel_header:
+        headers["openai-sentinel-token"] = sentinel_header
+    if so_header:
+        headers["openai-sentinel-so-token"] = so_header
+        logger.info("[OTP] 重新发送验证码已附加 openai-sentinel-so-token 头")
     logger.info("[OTP] 请求重新发送邮箱验证码...")
     resp = session.get(url, headers=headers, allow_redirects=True)
     if resp.status_code >= 400:

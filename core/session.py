@@ -32,7 +32,7 @@ class BrowserSession:
     使用 curl_cffi 的 impersonate 功能绕过 Cloudflare TLS 指纹检测。
     """
 
-    def __init__(self, proxy: str = None, *, detect_exit_geo: bool = True):
+    def __init__(self, proxy: str = None, *, detect_exit_geo: bool = True, device_id: str = None):
         """
         初始化会话。
 
@@ -42,6 +42,9 @@ class BrowserSession:
                    显式传 "" 表示禁用代理。
             detect_exit_geo: 是否探测出口 IP 并自动选择语言/时区画像。
                              套餐查询等短请求可关闭，避免额外网络等待。
+            device_id: 复用指定 oai-did（如注册时的 device_id）。
+                       OpenAI 会把 access_token 与设备绑定，后续 API 调用若换
+                       device_id 会触发 token_revoked；传该值可避免。
         """
         # proxy=None  → 从池里随机抽（默认行为）
         # proxy=""    → 禁用代理（直连）
@@ -51,8 +54,8 @@ class BrowserSession:
         else:
             self.proxy = proxy
 
-        # 生成设备ID（oai-did），整个注册流程复用
-        self.device_id = str(uuid.uuid4())
+        # 生成设备ID（oai-did），整个注册流程复用；外部可传注册时的 device_id
+        self.device_id = device_id or str(uuid.uuid4())
 
         # 生成 auth_session_logging_id
         self.auth_session_logging_id = str(uuid.uuid4())
@@ -89,6 +92,8 @@ class BrowserSession:
         # 会话级熔断：收到 403/429 后停止继续打后续接口，避免异常状态下扩大误伤。
         self.blocked_until = 0.0
         self.blocked_reason = ""
+        # Cloudflare challenge 连续计数（瞬态，区别于真实封禁）
+        self.cf_challenge_count = 0
 
         # 先用当前代理检测出口 IP 地理信息，再为本会话挑一份稳定浏览器画像。
         # 这样 Accept-Language / navigator.language / timezone 可自动跟随出口地区。
@@ -411,16 +416,17 @@ class BrowserSession:
 
     def get_sentinel_headers(self) -> dict:
         """
-        获取 sentinel.openai.com 的请求头。
+        获取 sentinel API（SENTINEL_REQ_ORIGIN）的请求头。
         用于步骤6、9、11。
         """
-        from config import SENTINEL_SV
+        from config import SENTINEL_REQ_ORIGIN, SENTINEL_SV
+        sv = getattr(self, "sentinel_sv", "") or SENTINEL_SV
         headers = self._get_common_headers()
         headers.update({
             "accept": "*/*",
             "content-type": "text/plain;charset=UTF-8",
-            "origin": "https://sentinel.openai.com",
-            "referer": f"https://sentinel.openai.com/backend-api/sentinel/frame.html?sv={SENTINEL_SV}",
+            "origin": SENTINEL_REQ_ORIGIN,
+            "referer": f"{SENTINEL_REQ_ORIGIN}/backend-api/sentinel/frame.html?sv={sv}",
             "sec-fetch-site": "same-origin",
             "sec-fetch-mode": "cors",
             "sec-fetch-dest": "empty",
@@ -480,12 +486,46 @@ class BrowserSession:
             return max(0, int(text))
         return 0
 
+    @staticmethod
+    def _is_cf_challenge(resp) -> bool:
+        """判断响应是否为 Cloudflare 瞬态 challenge（区别于真实封禁）。"""
+        if resp is None:
+            return False
+        try:
+            status = int(getattr(resp, "status_code", 0) or 0)
+        except (TypeError, ValueError):
+            status = 0
+        if status not in (403, 503):
+            return False
+        text = str(getattr(resp, "text", "") or "").lower()
+        return (
+            "<title>just a moment" in text
+            or "<title>attention required! | cloudflare" in text
+            or "cf-chl-" in text
+            or "__cf_chl_" in text
+            or "cf-challenge" in text
+            or "challenge-platform" in text
+        )
+
     def _observe_response_for_circuit_breaker(self, resp, url: str):
         status = int(getattr(resp, "status_code", 0) or 0)
         self._observe_cf_cookie_changes(url)
         if status not in (403, 429):
             return resp
         retry_after = self._parse_retry_after(getattr(resp, "headers", {}).get("retry-after") if getattr(resp, "headers", None) else None)
+
+        # Cloudflare 瞬态 challenge：不立即熔断，短冷却 + 交给调用方轮换代理重试
+        if self._is_cf_challenge(resp):
+            cool_down = retry_after if retry_after > 0 else 30
+            self.blocked_until = max(self.blocked_until, time.time() + min(cool_down, 120))
+            self.blocked_reason = f"CF challenge HTTP {status} from {url}"
+            self.cf_challenge_count = getattr(self, "cf_challenge_count", 0) + 1
+            logger.warning(
+                "[CF-challenge] HTTP %s 触发 Cloudflare challenge（第 %s 次），短冷却 %ss：%s",
+                status, self.cf_challenge_count, min(cool_down, 120), url,
+            )
+            return resp
+
         cool_down = retry_after if retry_after > 0 else (300 if status == 429 else 900)
         self.blocked_until = max(self.blocked_until, time.time() + min(cool_down, 3600))
         self.blocked_reason = f"HTTP {status} from {url}"

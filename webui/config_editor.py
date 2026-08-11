@@ -47,7 +47,7 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "REGISTRATION_DRIVER", "file": "roxybrowser.py", "type": "str", "group": "注册方式",
-        "label": "注册驱动", "help": "默认推荐 roxy；protocol=纯协议，容易封号不建议；roxy=RoxyBrowser；cloak=CloakBrowser；browser_use=Browser Use Cloud+Playwright；skyvern=Skyvern Browser Sessions+Playwright",
+        "label": "注册驱动", "help": "protocol=纯协议；roxy=RoxyBrowser；cloak=CloakBrowser；browser_use=Browser Use Cloud+Playwright；skyvern=Skyvern Browser Sessions+Playwright",
     },
 
     # ---- CloakBrowser ----
@@ -235,22 +235,6 @@ EDITABLE_FIELDS = [
         "label": "结束后删除环境", "help": "一号一环境模式下，任务结束后删除本轮创建的 Roxy Profile",
     },
     {
-        "key": "ROXY_RANDOM_OS_ON_CREATE", "file": "roxybrowser.py", "type": "bool", "group": "RoxyBrowser",
-        "label": "创建环境随机OS", "help": "创建 Roxy 环境时每次在 Windows / macOS 中随机，不固定 macOS",
-    },
-    {
-        "key": "ROXY_RANDOM_OS_CHOICES", "file": "roxybrowser.py", "type": "str", "group": "RoxyBrowser",
-        "label": "随机OS范围", "help": "逗号分隔，默认 Windows,macOS；Roxy 支持 Windows / macOS / Linux / IOS / Android",
-    },
-    {
-        "key": "ROXY_RANDOM_PROFILE_NAME_ON_CREATE", "file": "roxybrowser.py", "type": "bool", "group": "RoxyBrowser",
-        "label": "创建环境随机名称", "help": "创建 Roxy 环境时自动生成不同名称，避免固定 gpt-free-register",
-    },
-    {
-        "key": "ROXY_PROFILE_NAME_PREFIX", "file": "roxybrowser.py", "type": "str", "group": "RoxyBrowser",
-        "label": "随机名称前缀", "help": "默认 rb；实际名称格式类似 rb-时间戳-随机码",
-    },
-    {
         "key": "ROXY_CREATE_USE_PROXY_POOL", "file": "roxybrowser.py", "type": "bool", "group": "RoxyBrowser",
         "label": "创建环境使用代理池", "help": "创建 Roxy 环境时从配置页「代理池」随机取一个代理，写入 Roxy proxyInfo",
     },
@@ -263,8 +247,8 @@ EDITABLE_FIELDS = [
         "label": "删除接口路径", "help": "默认 /browser/delete；如 Roxy 版本不同可调整",
     },
     {
-        "key": "CODEX_OAUTH_DRIVER", "file": "codex.py", "type": "str", "group": "Codex",
-        "label": "Codex授权驱动", "help": "默认推荐 roxy；protocol=原协议授权；roxy=用 RoxyBrowser；cloak=用 CloakBrowser；browser_use=用 Browser Use Cloud；skyvern=用 Skyvern；same_as_registration=跟随注册驱动",
+        "key": "CODEX_OAUTH_DRIVER", "file": "codex.py", "type": "str", "group": "CPA / Codex",
+        "label": "Codex授权驱动", "help": "protocol=原协议授权；roxy=用 RoxyBrowser；cloak=用 CloakBrowser；browser_use=用 Browser Use Cloud；skyvern=用 Skyvern；same_as_registration=跟随注册驱动",
     },
     {
         "key": "ROXY_CODEX_CALLBACK_TIMEOUT", "file": "roxybrowser.py", "type": "int", "group": "RoxyBrowser",
@@ -285,10 +269,6 @@ EDITABLE_FIELDS = [
     {
         "key": "HUMANIZE_DELAY_FACTOR", "file": "humanize.py", "type": "float", "group": "人工节奏",
         "label": "停顿倍率", "help": "随机停顿整体倍率；1.0=默认，0.5=减半，2.0=加倍",
-    },
-    {
-        "key": "ENABLE_HUMANIZE_BROWSER_ACTIONS", "file": "humanize.py", "type": "bool", "group": "人工节奏",
-        "label": "浏览器动作随机化", "help": "Roxy/Cloak 点击、输入、页面观察使用随机鼠标落点和逐字输入，降低机械操作痕迹",
     },
     # ---- 邮箱 / OTP ----
     {
@@ -313,7 +293,7 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "EMAIL_SOURCE", "file": "email.py", "type": "str", "group": "邮箱 / OTP",
-        "label": "邮箱来源", "help": "可填单个或多个，逗号分隔并按顺序兜底：outlook,generic_api,cloudflare_domain,cloudflare,gptmail,mailnest,cloudmail",
+        "label": "邮箱来源", "help": "可填单个或多个，逗号分隔并按顺序兜底：outlook,generic_api,cloudflare_domain,cloudflare,gptmail,mailnest,cloudmail,manymail,mailtm（manymail/mailtm 建议放最后作保底）",
     },
     {
         "key": "GPTMAIL_API_KEY", "file": "email.py", "type": "str", "group": "邮箱 / OTP",
@@ -428,6 +408,29 @@ EDITABLE_FIELDS = [
         "key": "CLOUDMAIL_RANDOM_LOCAL_LENGTH", "file": "email.py", "type": "int", "group": "邮箱 / OTP",
         "label": "CloudMail随机名前缀长度", "help": "生成邮箱 local-part 的长度，建议 10-16",
     },
+
+    {
+        "key": "MANYMAIL_API_BASE", "file": "email.py", "type": "str", "group": "邮箱 / OTP",
+        "label": "ManyMail API 地址", "help": "自建 ManyMail DuckMail API，如 http://100.64.229.45:8080；EMAIL_SOURCE 含 manymail 时启用，建议放末位保底",
+        "storage": "env",
+    },
+    {
+        "key": "MANYMAIL_DOMAINS", "file": "email.py", "type": "list_str_multiline", "group": "邮箱 / OTP",
+        "label": "ManyMail 域名列表", "help": "可留空；运行时 GET /domains。也可固定 mail.lijin671.com",
+    },
+    {
+        "key": "MANYMAIL_RANDOM_LOCAL_LENGTH", "file": "email.py", "type": "int", "group": "邮箱 / OTP",
+        "label": "ManyMail随机名前缀长度", "help": "生成邮箱 local-part 长度，建议 10-16",
+    },
+    {
+        "key": "MAILTM_API_BASE", "file": "email.py", "type": "str", "group": "邮箱 / OTP",
+        "label": "Mail.tm API 地址", "help": "默认 https://api.mail.tm 零配置；可指向自建/镜像 API",
+        "storage": "env",
+    },
+    {
+        "key": "MAILTM_DOMAINS", "file": "email.py", "type": "list_str_multiline", "group": "邮箱 / OTP",
+        "label": "Mail.tm 域名列表", "help": "可留空；运行时 GET /domains 自动拉取",
+    },
     # ---- 浏览器地区画像 ----
     {
         "key": "BROWSER_LOCALE_PROFILE", "file": "browser.py", "type": "str", "group": "浏览器画像",
@@ -501,62 +504,33 @@ EDITABLE_FIELDS = [
     },
     {
         "key": "EXTRACT_LINK_TYPE", "file": "extract_link.py", "type": "str", "group": "提链",
-        "label": "提链类型", "help": "支持 pix / upi / kakao_pay / ideal",
+        "label": "提链类型", "help": "pix 或 upi",
     },
     {
         "key": "EXTRACT_LINK_WORKERS", "file": "extract_link.py", "type": "int", "group": "提链",
         "label": "提链并发数", "help": "批量提链后台线程数，建议 1-4",
     },
-    # ---- Codex 配置 ----
-    {
-        "key": "SUB2API_AUTO_EXPORT", "file": "sub2api.py", "type": "bool", "group": "Codex",
-        "label": "Agent sub2 自动同步", "help": "生成 Codex Agent Token 成功后自动同步到 sub2api",
-    },
-    {
-        "key": "SUB2API_SYNC_MODE", "file": "sub2api.py", "type": "str", "group": "Codex",
-        "label": "Agent sub2 同步模式", "help": "api=直接上传接口；file=写本地json；both=接口+本地json",
-    },
-    {
-        "key": "SUB2API_API_BASE", "file": "sub2api.py", "type": "str", "group": "Codex",
-        "label": "sub2 API基址", "help": "sub2api 服务地址；Agent Token 上传和 Codex OAuth 共用，例如 http://127.0.0.1:8080",
-    },
-    {
-        "key": "SUB2API_API_KEY", "file": "sub2api.py", "type": "str", "group": "Codex",
-        "label": "sub2 API Key", "help": "sub2api 管理接口 API Key；请求头使用 x-api-key；为空则不带鉴权头", "storage": "env", "secret": True,
-    },
-    {
-        "key": "SUB2API_API_TIMEOUT", "file": "sub2api.py", "type": "int", "group": "Codex",
-        "label": "sub2 超时", "help": "sub2api 请求超时秒数",
-    },
-    {
-        "key": "SUB2API_OUTPUT_PATH", "file": "sub2api.py", "type": "str", "group": "Codex",
-        "label": "Agent sub2 本地路径", "help": "仅 SUB2API_SYNC_MODE=file/both 时使用；相对路径按项目根目录解析",
-    },
-    {
-        "key": "SUB2API_PROXY_KEY", "file": "sub2api.py", "type": "str", "group": "Codex",
-        "label": "Agent sub2 代理键", "help": "可选；写入 account.proxy_key，并在 proxies 为空时初始化 proxies[0].proxy_key",
-    },
     # ---- 接码平台 ----
-    # ---- Codex：基础 / CPA / sub2api 配置 ----
+    # ---- CPA / Codex 授权 ----
     {
-        "key": "CODEX_AUTH_URL_SOURCE", "file": "codex.py", "type": "str", "group": "Codex",
-        "label": "授权地址来源", "help": "cpa=CPA生成并上传CPA；sub2=sub2生成并上传sub2；local=本地PKCE",
+        "key": "CODEX_AUTH_URL_SOURCE", "file": "codex.py", "type": "str", "group": "CPA / Codex",
+        "label": "授权地址来源", "help": "cpa=由 CPA 管理接口生成授权地址；local=旧版本地生成 PKCE 授权地址",
     },
     {
-        "key": "CPA_MANAGEMENT_URL", "file": "codex.py", "type": "str", "group": "Codex",
+        "key": "CPA_MANAGEMENT_URL", "file": "codex.py", "type": "str", "group": "CPA / Codex",
         "label": "CPA 管理地址", "help": "例如 http://localhost:8317/admin/oauth；程序会取 origin 调用 /v0/management/*",
     },
     {
-        "key": "CPA_MANAGEMENT_KEY", "file": "codex.py", "type": "str", "group": "Codex",
+        "key": "CPA_MANAGEMENT_KEY", "file": "codex.py", "type": "str", "group": "CPA / Codex",
         "label": "管理密钥", "help": "保存在 .env（CPA_MANAGEMENT_KEY），不写回 config/*.py",
         "storage": "env", "secret": True,
     },
     {
-        "key": "CPA_REQUEST_TIMEOUT", "file": "codex.py", "type": "int", "group": "Codex",
+        "key": "CPA_REQUEST_TIMEOUT", "file": "codex.py", "type": "int", "group": "CPA / Codex",
         "label": "CPA 超时(秒)", "help": "请求 CPA 管理接口的超时时间",
     },
     {
-        "key": "CPA_SAVE_CALLBACK_RECEIPT", "file": "codex.py", "type": "bool", "group": "Codex",
+        "key": "CPA_SAVE_CALLBACK_RECEIPT", "file": "codex.py", "type": "bool", "group": "CPA / Codex",
         "label": "保存CPA回执", "help": "CPA 未返回完整授权文件时，本地仍保存一份回调提交记录",
     },
 
@@ -614,6 +588,84 @@ EDITABLE_FIELDS = [
     {
         "key": "L_PHONE_PREFIX", "file": "codex.py", "type": "str", "group": "接码平台",
         "label": "L 号码前缀", "help": "L 返回号码不含国家码时填写，例如美国 10 位本地号填 1；留空则不补",
+    },
+    # ---- 导出 / CPA 导入 ----
+    {
+        "key": "AUTO_EXPORT_TO_CHATGPT2API", "file": "export.py", "type": "bool", "group": "导出 / CPA 导入",
+        "label": "注册后即时导出 ChatGPT-to-API", "help": "token 寿命短(~30min)，注册成功当场写入 access_tokens.json",
+    },
+    {
+        "key": "AUTO_EXPORT_PROXIES_TXT", "file": "export.py", "type": "bool", "group": "导出 / CPA 导入",
+        "label": "同步更新 proxies.txt", "help": "导出时把 PROXY_POOL 写入 ChatGPT-to-API/proxies.txt",
+    },
+    {
+        "key": "CHATGPT2API_TOKENS_FILE", "file": "export.py", "type": "str", "group": "导出 / CPA 导入",
+        "label": "access_tokens.json 路径", "help": "ChatGPT-to-API 的账号文件路径",
+    },
+    {
+        "key": "AUTO_IMPORT_TO_CPA_MANAGER", "file": "export.py", "type": "bool", "group": "导出 / CPA 导入",
+        "label": "注册后即时导入 CPA Manager Plus", "help": "上传 auth 文件到 CPA Manager Plus(18317)，模型立即可用",
+    },
+    {
+        "key": "CPA_MANAGER_PLUS_BASE", "file": "export.py", "type": "str", "group": "导出 / CPA 导入",
+        "label": "CPA Manager Plus 地址", "help": "管理接口地址，默认 http://127.0.0.1:18317",
+    },
+    {
+        "key": "CPA_MANAGER_PLUS_KEY", "file": "export.py", "type": "str", "group": "导出 / CPA 导入", "secret": True,
+        "label": "CPA Manager Plus 密钥", "help": "docker logs cpa-manager-plus 首启日志的 cpamp_... 管理密钥；与 8317 的 CPA_MANAGEMENT_KEY 不同",
+    },
+    {
+        "key": "CPA_IMPORT_VERIFY_MODELS", "file": "export.py", "type": "bool", "group": "导出 / CPA 导入",
+        "label": "导入后验证模型发现", "help": "上传后调 /models 确认账号可被模型发现",
+    },
+    # ---- Plus 零元开通 ----
+    {
+        "key": "ENABLE_ZERO_PLUS", "file": "plus.py", "type": "bool", "group": "Plus 零元开通",
+        "label": "启用零元 Plus 开通", "help": "注册成功后自动切菲/绑卡/激活订阅（阶段9.5）",
+    },
+    {
+        "key": "ZERO_PLUS_BIND_MODE", "file": "plus.py", "type": "str", "group": "Plus 零元开通",
+        "label": "绑卡模式", "help": "browser=浏览器直绑；api=Stripe API 直绑",
+    },
+    {
+        "key": "ZERO_PLUS_ACTIVATE_AFTER_BIND", "file": "plus.py", "type": "bool", "group": "Plus 零元开通",
+        "label": "绑卡后自动激活订阅", "help": "绑卡成功后自动走 checkout confirm 激活链路（阶段7.5）",
+    },
+    {
+        "key": "ZERO_PLUS_STRIPE_KEY", "file": "plus.py", "type": "str", "group": "Plus 零元开通", "secret": True,
+        "label": "Stripe Publishable Key", "help": "留空自动从 checkout 页面/已知 key 发现",
+    },
+    {
+        "key": "ZERO_PLUS_COUNTRY_LOCK_FALLBACK", "file": "plus.py", "type": "bool", "group": "Plus 零元开通",
+        "label": "切菲失败降级注册国结算", "help": "billing country must match request country 时降级非0元结算",
+    },
+    {
+        "key": "PLUS_CARD_SOURCE", "file": "plus.py", "type": "str", "group": "Plus 零元开通",
+        "label": "卡来源", "help": "env=环境变量；pool=卡池文件",
+    },
+    {
+        "key": "PLUS_CARD_NUMBER", "file": "plus.py", "type": "str", "group": "Plus 零元开通", "secret": True,
+        "label": "卡号", "help": "虚拟卡卡号（451311/523686 BIN）",
+    },
+    {
+        "key": "PLUS_CARD_EXP_MONTH", "file": "plus.py", "type": "str", "group": "Plus 零元开通", "secret": True,
+        "label": "有效期月", "help": "MM",
+    },
+    {
+        "key": "PLUS_CARD_EXP_YEAR", "file": "plus.py", "type": "str", "group": "Plus 零元开通", "secret": True,
+        "label": "有效期年", "help": "YYYY",
+    },
+    {
+        "key": "PLUS_CARD_CVV", "file": "plus.py", "type": "str", "group": "Plus 零元开通", "secret": True,
+        "label": "CVV", "help": "三位安全码",
+    },
+    {
+        "key": "PLUS_PROXY_MODE", "file": "plus.py", "type": "str", "group": "Plus 零元开通",
+        "label": "Plus 代理模式", "help": "fixed=固定代理；pool=代理池",
+    },
+    {
+        "key": "PLUS_PROXY", "file": "plus.py", "type": "str", "group": "Plus 零元开通",
+        "label": "Plus 固定代理", "help": "绑卡专用代理（住宅/干净 IP，避免 Stripe 挑战）",
     },
 ]
 

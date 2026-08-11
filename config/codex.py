@@ -53,7 +53,7 @@ ENABLE_CODEX_AUTO: bool = False
 #   "cloak"       = 调用 CloakBrowser 完成授权页面/手机验证/回调捕获
 #   "browser_use" = 调用 Browser Use Cloud 完成授权页面/手机验证/回调捕获
 #   "same_as_registration" = 跟随 REGISTRATION_DRIVER
-CODEX_OAUTH_DRIVER: str = "roxy"
+CODEX_OAUTH_DRIVER: str = "cloak"
 
 
 
@@ -64,7 +64,6 @@ CODEX_OAUTH_DRIVER: str = "roxy"
 
 # 授权地址来源：
 #   "cpa"   = 通过 CPA 管理接口 /v0/management/codex-auth-url 生成（推荐）
-#   "sub2"  = 通过 sub2 管理接口生成，并把 callback 上传到 sub2
 #   "local" = 使用本模块保留的本地 PKCE 生成逻辑（兼容旧方案）
 CODEX_AUTH_URL_SOURCE: str = "cpa"
 
@@ -94,6 +93,10 @@ CPA_SAVE_CALLBACK_RECEIPT: bool = True
 #   "grizzly" = GrizzlySMS，接口说明见 https://api.grizzlysms.com
 #   "l"       = 本地 L 取号服务，接口说明见 L_API.md
 #   "h"       = 本地 H 取号服务，接口说明见 H_API.md
+#   "hero"    = HeroSMS（sms-activate 兼容，菲律宾 GCash 接码），
+#               配置见 config/plus.py 的 HERO_SMS_*，出口代理优先走 PROXY_POOL 轮换
+# 服务码注意：GrizzlySMS 的 OpenAI/ChatGPT 服务码是 "dr"（API 名称 "AI Chat"），
+#             不是 "openai"（实测 2026-08-07，见 Clqx/gpt-token-refresher README）
 # ============================================================
 
 SMS_PROVIDER: str = "l"
@@ -125,6 +128,13 @@ SMS_POLL_INTERVAL: int = 5
 
 # 接码平台 HTTP 请求超时（秒）
 SMS_REQUEST_TIMEOUT: int = 30
+
+# ── 解码保号（AT→refresh_token）────────────────────────────────────────
+# 注册成功后是否自动跑 phone_verify_refresh：
+#   AT → GrizzlySMS 接码 → Codex OAuth → refresh_token + CPA 兼容凭证
+#   （codex_accounts/codex-{email}.json，可直接导入 CPA/CLIProxyAPI 长期使用）
+# 默认 False：不调用、不产生任何接码费用。仅当用户明确说"解码保号"时才置 true。
+REFRESH_DECODE_ENABLED: bool = False
 
 
 # ============================================================
@@ -161,4 +171,4 @@ L_ADMIN_AUTH_CODE: str = env_str("L_ADMIN_AUTH_CODE", "")
 L_PHONE_PREFIX: str = ""
 
 # ---- .env overrides for WebUI editable fields ----
-apply_env_overrides(globals(), {'ENABLE_CODEX_AUTO': 'bool', 'CODEX_OAUTH_DRIVER': 'str', 'CODEX_AUTH_URL_SOURCE': 'str', 'CPA_MANAGEMENT_URL': 'str', 'CPA_MANAGEMENT_KEY': 'str', 'CPA_REQUEST_TIMEOUT': 'int', 'CPA_CALLBACK_SUBMIT_RETRIES': 'int', 'CPA_CALLBACK_SUBMIT_RETRY_DELAY': 'int', 'CPA_SAVE_CALLBACK_RECEIPT': 'bool', 'SMS_PROVIDER': 'str', 'SMS_COUNTRY': 'str', 'SMS_SERVICE': 'str', 'SMS_MAX_RETRIES': 'int', 'SMS_CODE_WAIT': 'int', 'SMS_API_KEY': 'str', 'H_API_BASE': 'str', 'H_ADMIN_AUTH_CODE': 'str', 'H_PHONE_PREFIX': 'str', 'H_PHONE_ACQUIRE_MODE': 'str', 'L_API_BASE': 'str', 'L_ADMIN_AUTH_CODE': 'str', 'L_PHONE_PREFIX': 'str'})
+apply_env_overrides(globals(), {'ENABLE_CODEX_AUTO': 'bool', 'CODEX_OAUTH_DRIVER': 'str', 'CODEX_AUTH_URL_SOURCE': 'str', 'CPA_MANAGEMENT_URL': 'str', 'CPA_MANAGEMENT_KEY': 'str', 'CPA_REQUEST_TIMEOUT': 'int', 'CPA_SAVE_CALLBACK_RECEIPT': 'bool', 'SMS_PROVIDER': 'str', 'SMS_COUNTRY': 'str', 'SMS_SERVICE': 'str', 'SMS_MAX_RETRIES': 'int', 'SMS_CODE_WAIT': 'int', 'SMS_API_KEY': 'str', 'REFRESH_DECODE_ENABLED': 'bool', 'H_API_BASE': 'str', 'H_ADMIN_AUTH_CODE': 'str', 'H_PHONE_PREFIX': 'str', 'H_PHONE_ACQUIRE_MODE': 'str', 'L_API_BASE': 'str', 'L_ADMIN_AUTH_CODE': 'str', 'L_PHONE_PREFIX': 'str'})

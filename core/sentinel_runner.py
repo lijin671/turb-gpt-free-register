@@ -5,7 +5,8 @@ Sentinel Runner 适配层
 让 Node.js 在 vm 沙箱中真实运行 sdk.js，生成可通过校验的 sentinel-token。
 
 工作原理：
-1. Python 端先调用 sentinel.openai.com/backend-api/sentinel/req 拿到 challenge JSON
+1. Python 端先调用 config.openai_protocol.SENTINEL_REQ_URL（默认 sentinel.openai.com，
+   可通过 SENTINEL_REQ_ORIGIN 覆盖）拿到 challenge JSON
 2. 把 challenge 写入临时文件
 3. 调用 node sentinel-runner.js --challenge-file <临时文件> ...
 4. 捕获 stdout 即为 openai-sentinel-token 的 value
@@ -17,6 +18,8 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+from core.sentinel_sdk import ensure_sentinel_sdk, script_src_for_version
 
 from config import (
     USER_AGENT,
@@ -94,9 +97,11 @@ def generate_sentinel_token(
     react_container_key: str | None = None,
     react_resources_key: str | None = None,
     cookie: str | None = None,
+    sdk_path: str | None = None,
+    sentinel_sv: str | None = None,
 ) -> str:
     """
-    把 sentinel.openai.com 返回的 challenge 喂给 sdk.js，生成最终 sentinel-token 字符串。
+    把 sentinel/req 返回的 challenge 喂给 sdk.js，生成最终 sentinel-token 字符串。
 
     Args:
         challenge: sentinel/req 返回的完整 JSON（含 token / proofofwork / turnstile / so 字段）
@@ -118,6 +123,17 @@ def generate_sentinel_token(
         raise ValueError("flow 不能为空")
     if not device_id:
         raise ValueError("device_id 不能为空")
+
+    # SDK 版本自动发现：默认用最新版（core.sentinel_sdk），显式传入 sdk_path 时
+    # 保持调用方指定的版本/路径（如测试或手动固定版本）。
+    if not sdk_path:
+        resolved_sdk, resolved_sv, resolved_src = ensure_sentinel_sdk()
+        sdk_path = str(resolved_sdk)
+        sentinel_sv = resolved_sv
+    else:
+        sentinel_sv = sentinel_sv or SENTINEL_SV
+    script_src = script_src_for_version(sentinel_sv)
+    logger.info(f"[SentinelRunner] 使用 sdk.js v{sentinel_sv}: {sdk_path}")
 
     profile = browser_profile or {}
     browser_family = str(profile.get("browser_family") or "chrome")
@@ -186,8 +202,8 @@ def generate_sentinel_token(
             "--navigator-vendor", navigator_vendor,
             "--user-agent-data-platform", user_agent_data_platform,
             "--request-idle-callback", "1" if request_idle_callback else "0",
-            "--sdk", str(_SDK_PATH),
-            "--script-src", f"https://sentinel.openai.com/sentinel/{SENTINEL_SV}/sdk.js",
+            "--sdk", str(sdk_path),
+            "--script-src", script_src,
             "--build-id", runner_build_id,
             # 与 config.browser / core.sentinel.py 中的指纹默认值保持一致
             "--width", str(screen_width),

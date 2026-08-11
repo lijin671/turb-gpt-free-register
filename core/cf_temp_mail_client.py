@@ -699,3 +699,239 @@ def fetch_latest_otp(
         return best_otp
 
     raise CFTempMailError(f"等待 Cloudflare 验证码超时: {target}; {last_error}")
+
+
+# ===== 优化：parsed_mail API 支持（cloudflare_temp_email 服务端解析） =====
+# cloudflare_temp_email 提供 /api/parsed_mails?limit=&offset= 和 /api/parsed_mail/:id
+# 服务端已解析 subject/text/html/attachments，无需本地 MIME 解析，更可靠
+
+def _list_parsed_mails(jwt: str, *, limit: int = 20, offset: int = 0) -> list[dict]:
+    """使用服务端 parsed_mails 端点，获取已解析的邮件列表。
+
+    优势：
+        - 服务端用 Rust WASM mail-parser 解析，比本地 Python email 模块更健壮
+        - 直接给出 subject/text/html/attachments，无需 _parse_raw_email
+        - 兼容 cloudflare_temp_email >= 2026-04 版本
+
+    Returns:
+        parsed_mail 列表，每项含 id/source/to/subject/text/html/attachments/created_at
+    """
+    safe_limit = max(1, min(100, int(limit or 20)))
+    safe_offset = max(0, int(offset or 0))
+    try:
+        payload = _request(
+            "GET",
+            "/api/parsed_mails",
+            bearer_jwt=jwt,
+            params={"limit": safe_limit, "offset": safe_offset},
+        )
+    except CFTempMailError:
+        return []
+
+    items = _pick_list_payload(payload)
+    if not items:
+        return []
+
+    for item in items:
+        # parsed_mails 的 source 字段 = 发件人地址
+        if "source" in item and "from" not in item:
+            item["from"] = item["source"]
+        # created_at 格式 "2026-04-21 10:00:00"（UTC 无时区后缀）
+        if "created_at" in item and not item.get("created_at"):
+            item["created_at"] = item.get("createdAt", "")
+    return items
+
+
+def _get_parsed_mail(jwt: str, message_id: str | int) -> dict:
+    """获取单封已解析邮件详情。"""
+    if not message_id:
+        return {}
+    try:
+        payload = _request("GET", f"/api/parsed_mail/{message_id}", bearer_jwt=jwt)
+        if isinstance(payload, dict):
+            if "source" in payload and "from" not in payload:
+                payload["from"] = payload["source"]
+            return payload
+    except CFTempMailError as exc:
+        logger.debug("[Cloudflare] parsed_mail 详情获取失败 id=%s: %s", message_id, exc)
+    return {}
+
+
+def _otp_item_from_parsed(parsed: dict) -> dict:
+    """从 parsed_mail 构造 OTP 提取所需的 item dict。
+
+    parsed_mail 格式:
+        {
+            "id": 42,
+            "source": "noreply@openai.com",
+            "to": "abc@yourdomain.com",
+            "created_at": "2026-04-21 10:00:00",
+            "subject": "Your code is 123456",
+            "text": "Your code is 123456\\n",
+            "html": "<p>Your code is <b>123456</b></p>",
+            "attachments": [...]
+        }
+    """
+    sender = parsed.get("from") or parsed.get("source") or parsed.get("sender") or ""
+    subject = parsed.get("subject") or ""
+    text = parsed.get("text") or ""
+    html = parsed.get("html") or ""
+
+    # 独立 6 位码优先
+    standalone = _standalone_otp_from_html(html) or _standalone_otp_from_html(text)
+    if standalone:
+        text = f"verification code {standalone}\n{text}"
+
+    return {
+        "id": parsed.get("id"),
+        "from": sender,
+        "subject": subject,
+        "text": text,
+        "html": html,
+        "to": parsed.get("to") or ", ".join(_message_addresses(parsed)),
+        "created_at": parsed.get("created_at") or parsed.get("createdAt") or "",
+    }
+
+
+def fetch_latest_otp_enhanced(
+    email: str,
+    after_ts: float | None = None,
+    max_wait: int | None = None,
+    poll_interval: int | None = None,
+    settle_seconds: int | None = None,
+) -> str:
+    """增强版取 OTP：优先使用 parsed_mails API，回退到 raw mails。
+
+    优化点：
+        1. 先尝试 /api/parsed_mails（服务端解析），命中率高且解析可靠
+        2. 若服务端不支持（旧版或未部署），回退到 /api/mails + 本地 MIME 解析
+        3. 16 位/32 位垃圾码过滤（junk code）
+        4. settle 机制防止读到旧码重发后的新码
+    """
+    target = str(email or "").strip()
+    if not target:
+        raise CFTempMailError("Cloudflare 取码缺少邮箱地址")
+
+    account = get_account_context(target)
+    if account is None or not account.jwt:
+        raise CFTempMailError(
+            f"Cloudflare 邮箱上下文缺失: {target}。请确认该地址由当前进程 cloudflare 来源创建。"
+        )
+
+    wait_seconds = int(max_wait if max_wait is not None else _email_cfg.OTP_MAX_WAIT)
+    interval = max(1, int(poll_interval if poll_interval is not None else _email_cfg.OTP_POLL_INTERVAL))
+    settle = max(0, int(settle_seconds if settle_seconds is not None else getattr(_email_cfg, "OTP_SETTLE_SECONDS", 3)))
+    after = float(after_ts if after_ts is not None else time.time()) - 30
+    deadline = time.monotonic() + max(0, wait_seconds)
+
+    best_otp: str | None = None
+    best_timestamp = float("-inf")
+    best_message_key = ""
+    settle_until: float | None = None
+    last_error = "收件箱为空或尚未出现新的 OpenAI 验证码"
+    target_lower = target.lower()
+
+    # 探测 parsed_mails 是否可用
+    use_parsed = True
+    logger.info("[Cloudflare] 开始轮询邮箱 %s (parsed=%s)，最长 %ss", target, use_parsed, wait_seconds)
+
+    while time.monotonic() < deadline:
+        try:
+            if use_parsed:
+                messages = _list_parsed_mails(account.jwt)
+                if not messages:
+                    # 回退到 raw mails
+                    raw_messages = list_messages(account.jwt)
+                    messages = [_otp_item(m) for m in raw_messages]
+                    if raw_messages:
+                        use_parsed = False
+                        logger.info("[Cloudflare] parsed_mails 不可用，回退到 raw mails + 本地解析")
+            else:
+                messages = list_messages(account.jwt)
+                messages = [_otp_item(m) for m in messages]
+                # 拼详情
+                for i, m in enumerate(messages):
+                    msg_id = _message_id(m)
+                    if msg_id and not m.get("text") and not m.get("html"):
+                        detail = get_message_detail(account.jwt, msg_id)
+                        if detail:
+                            messages[i] = _otp_item(detail)
+        except CFTempMailError as exc:
+            last_error = str(exc)
+            logger.warning("[Cloudflare] 拉取邮件失败: %s", exc)
+            time.sleep(interval)
+            continue
+
+        if messages:
+            logger.debug("[Cloudflare] 本轮收件 %s 封", len(messages))
+
+        for item in messages:
+            # 地址过滤
+            addresses = [a.lower() for a in _message_addresses(item)]
+            if addresses and not any(target_lower == a or target_lower in a for a in addresses):
+                # parsed_mails 的 to 字段已含完整地址
+                to_field = str(item.get("to") or "").lower()
+                if target_lower not in to_field:
+                    continue
+
+            # 构造 OTP item
+            if use_parsed and isinstance(item.get("subject"), str):
+                otp_item = _otp_item_from_parsed(item)
+            else:
+                otp_item = _otp_item(item) if "raw" in item else item
+
+            if not looks_like_openai_email(otp_item):
+                logger.debug(
+                    "[Cloudflare] 跳过非 OpenAI 邮件 from=%s subject=%s",
+                    str(otp_item.get("from") or "")[:80],
+                    str(otp_item.get("subject") or "")[:80],
+                )
+                continue
+
+            ts = _message_timestamp(item) if not use_parsed else _message_timestamp(item)
+            if ts is not None and ts < after:
+                logger.debug(
+                    "[Cloudflare] 跳过过旧邮件 ts=%s after=%s subject=%s",
+                    int(ts), int(after), str(otp_item.get("subject") or "")[:60],
+                )
+                continue
+
+            otp = extract_otp(otp_item)
+            if not otp:
+                logger.info(
+                    "[Cloudflare] OpenAI 邮件未能抽取 6 位码 subject=%s",
+                    str(otp_item.get("subject") or "")[:80],
+                )
+                continue
+
+            message_key = str(otp_item.get("id") or f"{otp_item.get('subject')}|{otp}|{ts}")
+            effective_ts = ts if ts is not None else time.time()
+            if effective_ts > best_timestamp or (
+                effective_ts == best_timestamp and message_key != best_message_key and best_otp != otp
+            ):
+                if best_otp and best_otp != otp:
+                    logger.info("[Cloudflare] 发现更晚 OTP=%s，替换 %s", otp, best_otp)
+                elif not best_otp:
+                    logger.info("[Cloudflare] 锁定 OTP 候选 %s，等待 settle=%ss", otp, settle)
+                best_otp = otp
+                best_timestamp = effective_ts
+                best_message_key = message_key
+                settle_until = time.monotonic() + settle
+
+        now = time.monotonic()
+        if best_otp and settle_until is not None and now >= settle_until:
+            logger.info("[Cloudflare] settle 完成，返回 OTP=%s", best_otp)
+            return best_otp
+
+        remaining = max(0, int(deadline - now))
+        if remaining <= 0:
+            break
+        if max_wait is not None and remaining <= 0:
+            break
+        time.sleep(min(interval, max(1, remaining)))
+
+    if best_otp:
+        logger.warning("[Cloudflare] 总超时但已有候选，返回 OTP=%s", best_otp)
+        return best_otp
+
+    raise CFTempMailError(f"等待 Cloudflare 验证码超时: {target}; {last_error}")

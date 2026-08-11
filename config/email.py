@@ -22,7 +22,12 @@ USE_EMAIL_SERVICE = False
 #   "gptmail"           — GPTMail 临时邮箱 API（运行时随机生成邮箱并自动收码）
 #   "mailnest"          — MailNest/迈巢临时邮箱 API（运行时购买邮箱并自动收码）
 #   "cloudmail"         — CloudMail/Cloud Mail API（自动从平台获取域名并随机生成邮箱）
-EMAIL_SOURCE = "outlook,generic_api,mailnest"
+#   "manymail"          — 自建 ManyMail（DuckMail 兼容 REST）；建议放最后，作 GPT 注册保底
+#   "mailtm"            — 公共 Mail.tm 临时邮箱（零配置，参考 sleep-reg duckmail.py）；
+#                          域名被风控标记较重，成功率低，仅作最后兜底
+#   "icloud"            — 外购 iCloud 邮箱池（email====App专用密码，IMAP 取码；
+#                          教程 8.8 推荐，存活率更高，约 ¥0.2/个）
+EMAIL_SOURCE = "outlook,generic_api,mailnest,manymail"
 
 
 # ============================================================
@@ -39,6 +44,17 @@ OUTLOOK_FETCH_MODE = "auto"
 
 # 取邮件 API 的根 URL（远端模式使用）
 OUTLOOK_API_BASE = "https://mail.chatai.codes"
+
+
+# 是否在领取 Outlook 邮箱时生成 +tag 别名（base+tag@domain）。
+# 同一收件箱可产出多个互不相同的注册邮箱（参考 sleep-reg email_providers/outlook.py use_alias）；
+# OTP 仍从 base 收件箱收取（Graph/IMAP 均按收件箱返回，别名邮件落在同一 inbox）。
+OUTLOOK_ALIAS = True
+
+# True 时注册成功后把 base 账号放回 available（仅 OUTLOOK_ALIAS 开启时生效），
+# 让同一收件箱通过新别名继续产出注册邮箱。注意 OpenAI 可能关联同一收件箱的多个账号，
+# 建议配合 1ip1号 IP 纪律（不同账号走不同出口 IP）使用。
+OUTLOOK_ALIAS_REUSE_ON_SUCCESS = False
 
 
 # ============================================================
@@ -147,5 +163,49 @@ CLOUDMAIL_AUTO_ADD_USER = True
 # 随机邮箱 local-part 长度。
 CLOUDMAIL_RANDOM_LOCAL_LENGTH = 12
 
+
+
+# ============================================================
+# ManyMail 自建邮箱（DuckMail 兼容：/domains /accounts /token /messages）
+# EMAIL_SOURCE 含 manymail 时启用；请放在列表末尾作保底，勿抢高优先级来源。
+# ============================================================
+
+# API 根地址（Tailscale 内网优先），例如 http://100.64.229.45:8080
+MANYMAIL_API_BASE = env_str("MANYMAIL_API_BASE", "")
+
+# 可用域名；留空则运行时 GET /domains
+MANYMAIL_DOMAINS = []
+
+# 随机邮箱 local-part 长度
+MANYMAIL_RANDOM_LOCAL_LENGTH = 12
+
 # ---- .env overrides for WebUI editable fields ----
-apply_env_overrides(globals(), {'USE_EMAIL_SERVICE': 'bool', 'OTP_MAX_WAIT': 'int', 'OTP_POLL_INTERVAL': 'int', 'EMAIL_SOURCE': 'str', 'EMAIL_DOMAIN': 'str', 'QQ_EMAIL': 'str', 'QQ_IMAP_PASSWORD': 'str', 'GPTMAIL_API_KEY': 'str', 'OUTLOOK_FETCH_MODE': 'str', 'MAIL_NEST_API_KEY': 'str', 'MAIL_NEST_PROJECT_CODE': 'str', 'CLOUDFLARE_API_BASE': 'str', 'CLOUDFLARE_API_KEY': 'str', 'CLOUDFLARE_AUTH_MODE': 'str', 'CLOUDFLARE_CUSTOM_AUTH': 'str', 'CLOUDFLARE_PATH_DOMAINS': 'str', 'CLOUDFLARE_PATH_ACCOUNTS': 'str', 'CLOUDFLARE_PATH_TOKEN': 'str', 'CLOUDFLARE_PATH_MESSAGES': 'str', 'CLOUDFLARE_DEFAULT_DOMAINS': 'list_str_multiline', 'CLOUDFLARE_REQUEST_TIMEOUT': 'int', 'CLOUDFLARE_NAME_LENGTH': 'int', 'CLOUDMAIL_API_BASE': 'str', 'CLOUDMAIL_ADMIN_EMAIL': 'str', 'CLOUDMAIL_PASSWORD': 'str', 'CLOUDMAIL_TOKEN_PATH': 'str', 'CLOUDMAIL_AUTH_TOKEN': 'str', 'CLOUDMAIL_DOMAINS': 'list_str_multiline', 'CLOUDMAIL_AUTO_ADD_USER': 'bool', 'CLOUDMAIL_RANDOM_LOCAL_LENGTH': 'int'})
+apply_env_overrides(globals(), {'USE_EMAIL_SERVICE': 'bool', 'OTP_MAX_WAIT': 'int', 'OTP_POLL_INTERVAL': 'int', 'EMAIL_SOURCE': 'str', 'EMAIL_DOMAIN': 'str', 'QQ_EMAIL': 'str', 'QQ_IMAP_PASSWORD': 'str', 'GPTMAIL_API_KEY': 'str', 'OUTLOOK_FETCH_MODE': 'str', 'OUTLOOK_ALIAS': 'bool', 'OUTLOOK_ALIAS_REUSE_ON_SUCCESS': 'bool', 'MAIL_NEST_API_KEY': 'str', 'MAIL_NEST_PROJECT_CODE': 'str', 'CLOUDFLARE_API_BASE': 'str', 'CLOUDFLARE_API_KEY': 'str', 'CLOUDFLARE_AUTH_MODE': 'str', 'CLOUDFLARE_CUSTOM_AUTH': 'str', 'CLOUDFLARE_PATH_DOMAINS': 'str', 'CLOUDFLARE_PATH_ACCOUNTS': 'str', 'CLOUDFLARE_PATH_TOKEN': 'str', 'CLOUDFLARE_PATH_MESSAGES': 'str', 'CLOUDFLARE_DEFAULT_DOMAINS': 'list_str_multiline', 'CLOUDFLARE_REQUEST_TIMEOUT': 'int', 'CLOUDFLARE_NAME_LENGTH': 'int', 'CLOUDMAIL_API_BASE': 'str', 'CLOUDMAIL_ADMIN_EMAIL': 'str', 'CLOUDMAIL_PASSWORD': 'str', 'CLOUDMAIL_TOKEN_PATH': 'str', 'CLOUDMAIL_AUTH_TOKEN': 'str', 'CLOUDMAIL_DOMAINS': 'list_str_multiline', 'CLOUDMAIL_AUTO_ADD_USER': 'bool', 'CLOUDMAIL_RANDOM_LOCAL_LENGTH': 'int', 'MANYMAIL_API_BASE': 'str', 'MANYMAIL_DOMAINS': 'list_str_multiline', 'MANYMAIL_RANDOM_LOCAL_LENGTH': 'int', 'ICLOUD_ACCOUNTS_FILE': 'str', 'ICLOUD_IMAP_SERVER': 'str', 'ICLOUD_IMAP_PORT': 'int'})
+
+
+# ============================================================
+# iCloud 邮箱池（教程 8.8：注册 GPT 用 iCloud 邮箱存活率更高）
+# ============================================================
+
+# 邮箱池文件：每行 email====password（password 为 iCloud App 专用密码，用于 IMAP）
+ICLOUD_ACCOUNTS_FILE = "用于注册的icloud邮箱.txt"
+
+# iCloud IMAP 服务器 / 端口（App 专用密码登录）
+ICLOUD_IMAP_SERVER = "imap.mail.me.com"
+ICLOUD_IMAP_PORT = 993
+
+
+# ============================================================
+# Mail.tm 公共临时邮箱（零配置兜底；参考 napnow/sleep-reg duckmail.py，MIT）
+# EMAIL_SOURCE 含 "mailtm" 时启用。默认直连 https://api.mail.tm，
+# 也可指向自建/镜像 API（MAILTM_API_BASE），或固定域名池（MAILTM_DOMAINS）。
+# ============================================================
+
+# 留空默认 https://api.mail.tm；可填镜像地址覆盖
+MAILTM_API_BASE = ""
+
+# 固定可用域名（可选，多个用逗号分隔）；留空则实时拉取 /domains
+MAILTM_DOMAINS = []
+
+# 邮箱 local 部分长度
+MAILTM_RANDOM_LOCAL_LENGTH = 12

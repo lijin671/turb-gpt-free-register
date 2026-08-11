@@ -24,6 +24,14 @@ from urllib.parse import urljoin
 
 from curl_cffi.requests import Session as CurlSession
 
+# HeroSMS 平台（SMS_PROVIDER="hero"）复用 core.hero_sms 客户端
+from core.hero_sms import (
+    HeroSMSClient,
+    HeroSMSError,
+    CodeTimeoutError as HeroCodeTimeoutError,
+    InvalidApiKeyError as HeroInvalidApiKeyError,
+)
+
 # 注意：用 `from config import codex` 而不是 `from config.codex import X`，
 # 这样 WebUI 调 config.reload_all() 后，本模块通过 codex.X 读到的是最新值。
 from config import codex as _cfg
@@ -38,6 +46,10 @@ _MIN_CANCEL_DELAY = 125
 # 记录每个 activation_id 的取号时间，供 cancel() 判断是否要等。
 # 用模块级 dict 而不是改 acquire_number 返回值，保持向后兼容。
 _ACQUIRED_AT: dict[str, float] = {}
+
+# HeroSMS 每个激活号绑定的出口代理（同一激活号全程同一出口，
+# 绕 HeroSMS 的"10分钟2码/IP"限制；取号时从 PROXY_POOL 抽并缓存）。
+_HERO_PROXY_BY_ACTIVATION: dict[str, str] = {}
 
 
 class SmsProviderError(RuntimeError):
@@ -64,6 +76,32 @@ def _http() -> CurlSession:
 
 def _provider() -> str:
     return str(getattr(_cfg, "SMS_PROVIDER", "grizzly") or "grizzly").strip().lower()
+
+
+def _hero_client(activation_id: str = "") -> HeroSMSClient:
+    """构建 HeroSMS 客户端；出口代理优先 HERO_SMS_PROXY，否则从 PROXY_POOL 轮换。
+
+    同一 activation_id 复用取号时的代理（缓存 _HERO_PROXY_BY_ACTIVATION），
+    保证查码/完成/取消都走同一出口 IP。
+    """
+    from config import plus as _plus
+    proxy = str(_plus.HERO_SMS_PROXY or "").strip()
+    if not proxy and activation_id:
+        proxy = _HERO_PROXY_BY_ACTIVATION.get(activation_id, "")
+    if not proxy:
+        try:
+            from config.proxy import pick_proxy
+            proxy = pick_proxy() or ""
+        except Exception:
+            logger.debug("[SMS:Hero] 代理池不可用，走本机 IP", exc_info=True)
+            proxy = ""
+    if activation_id and proxy:
+        _HERO_PROXY_BY_ACTIVATION[activation_id] = proxy
+    return HeroSMSClient(
+        api_key=_plus.HERO_SMS_API_KEY,
+        base_url=_plus.HERO_SMS_BASE_URL,
+        proxy=proxy,
+    )
 
 
 def _request_grizzly(http: CurlSession, params: dict) -> str:
@@ -382,6 +420,23 @@ def acquire_number(
             )
             return activation_id, phone
 
+        if _provider() == "hero":
+            from config import plus as _plus
+            hero_service = str(service or _plus.HERO_SMS_SERVICE or "gcash").strip()
+            hero_country = int(str(country or _plus.HERO_SMS_COUNTRY or 6).strip() or 6)
+            max_price = float(_plus.HERO_SMS_MAX_PRICE or 0) or None
+            client = _hero_client()
+            act = client.get_number(service=hero_service, country=hero_country, max_price=max_price)
+            activation_id = str(act.id)
+            phone = str(act.phone or "").lstrip("+")
+            _HERO_PROXY_BY_ACTIVATION[activation_id] = client.proxy
+            _ACQUIRED_AT[activation_id] = time.time()
+            logger.info(
+                f"[SMS:Hero] 取号成功：id={activation_id}, phone=+{phone}, "
+                f"cost={act.cost}, proxy={client.proxy or '本机IP'}"
+            )
+            return activation_id, phone
+
         params = {
             "action": "getNumber",
             "service": service or _cfg.SMS_SERVICE,
@@ -427,6 +482,25 @@ def wait_for_sms_code(
         SmsCodeTimeout —— 超时没收到（上层可换号重试）
         SmsProviderError —— 激活被取消等
     """
+    if _provider() == "hero":
+        from config import plus as _plus
+        client = _hero_client(activation_id)
+        try:
+            code = client.wait_for_code(
+                int(activation_id),
+                timeout=max_wait or _plus.HERO_SMS_WAIT_TIMEOUT,
+                poll_interval=poll_interval or _plus.HERO_SMS_POLL_INTERVAL,
+                prefer_all_sms=bool(_plus.HERO_SMS_PREFER_ALL_SMS),
+            )
+            logger.info(f"[SMS:Hero] 收到验证码 activation_id={activation_id}：{code}")
+            return code
+        except HeroCodeTimeoutError as exc:
+            raise SmsCodeTimeout(str(exc)) from exc
+        except HeroInvalidApiKeyError as exc:
+            raise SmsProviderError(str(exc)) from exc
+        except HeroSMSError as exc:
+            raise SmsProviderError(str(exc)) from exc
+
     own_http = http is None
     http = http or _http()
     deadline = time.time() + (max_wait or _cfg.SMS_CODE_WAIT)
@@ -518,6 +592,9 @@ def set_status(activation_id: str, status: int, http: CurlSession | None = None)
         if _provider() == "l":
             logger.debug(f"[SMS:L] 忽略状态设置 id={activation_id}, status={status}")
             return "OK"
+        if _provider() == "hero":
+            _hero_client(activation_id).set_status(int(activation_id), status)
+            return "OK"
         return _request_grizzly(http, {"action": "setStatus", "status": str(status), "id": activation_id})
     finally:
         if own_http:
@@ -535,12 +612,36 @@ def complete(activation_id: str, http: CurlSession | None = None) -> None:
         logger.info(f"[SMS:H] 已完成 id={activation_id}")
         _ACQUIRED_AT.pop(activation_id, None)
         return
+    if _provider() == "hero":
+        try:
+            _hero_client(activation_id).complete(int(activation_id))
+            logger.info(f"[SMS:Hero] 已完成 activation_id={activation_id}")
+        except Exception as exc:
+            logger.warning(f"[SMS:Hero] 标记完成失败（不影响结果）：{exc}")
+        _ACQUIRED_AT.pop(activation_id, None)
+        _HERO_PROXY_BY_ACTIVATION.pop(activation_id, None)
+        return
     try:
         set_status(activation_id, 6, http=http)
         logger.info(f"[SMS] 已标记完成 activation_id={activation_id}")
         _ACQUIRED_AT.pop(activation_id, None)
     except Exception as exc:
         logger.warning(f"[SMS] 标记完成失败（不影响结果）：{exc}")
+
+
+def _do_hero_cancel_sync(activation_id: str) -> None:
+    """HeroSMS 同步取消：client.cancel 自带 EARLY_CANCEL_DENIED 等待重试。"""
+    try:
+        _hero_client(activation_id).cancel(int(activation_id))
+        logger.info(f"[SMS:Hero] 已取消 activation_id={activation_id}")
+    except Exception as exc:
+        logger.warning(
+            f"[SMS:Hero] 取消失败（不影响主流程）：id={activation_id}, "
+            f"{type(exc).__name__}: {exc}"
+        )
+    finally:
+        _ACQUIRED_AT.pop(activation_id, None)
+        _HERO_PROXY_BY_ACTIVATION.pop(activation_id, None)
 
 
 def _do_cancel_sync(activation_id: str, http_factory) -> None:
@@ -606,6 +707,19 @@ def cancel(activation_id: str, http: CurlSession | None = None, background: bool
             logger.warning(f"[SMS:H] 释放号码失败（不影响主流程）：id={activation_id}, {type(exc).__name__}: {exc}")
             _ACQUIRED_AT.pop(activation_id, None)
         return
+    if _provider() == "hero":
+        if not background:
+            _do_hero_cancel_sync(activation_id)
+            return
+        t = threading.Thread(
+            target=_do_hero_cancel_sync,
+            args=(activation_id,),
+            name=f"sms-hero-cancel-{activation_id}",
+            daemon=True,
+        )
+        t.start()
+        logger.debug(f"[SMS:Hero] 取消任务已派后台：activation_id={activation_id}")
+        return
 
     if not background:
         _do_cancel_sync(activation_id, _http)
@@ -619,3 +733,100 @@ def cancel(activation_id: str, http: CurlSession | None = None, background: bool
     )
     t.start()
     logger.debug(f"[SMS] 取消任务已派后台：activation_id={activation_id}")
+
+
+# ============================================================
+# 非破坏性预检（不取号、不产生费用）
+# ============================================================
+
+def _probe_reachable(base: str, provider: str) -> tuple[bool, str]:
+    """探测本地/远程接码后端可达性（任意 HTTP 响应即视为可达）。"""
+    http = _http()
+    try:
+        resp = http.get(base)
+        return True, f"{provider} 后端可达（HTTP {resp.status_code}）"
+    except Exception as exc:
+        return False, f"{provider} 后端不可达：{type(exc).__name__}: {str(exc)[:120]}"
+    finally:
+        http.close()
+
+
+def check_sms_availability() -> dict:
+    """非破坏性接码平台预检：不取号、不产生费用。
+
+    - provider=grizzly：getBalance 查余额（余额 <= 0 视为不可用）
+    - provider=l/h：校验配置完整性（API_BASE + 授权码 + service/country）+ 后端可达性
+    - 完全未配置时返回 ok=True + "未配置，跳过"，不阻塞健康检查
+
+    Returns: {"provider", "ok", "message", "balance", "checks"}。
+    """
+    provider = _provider()
+    if provider == "hero":
+        from config import plus as _plus
+        api_key = str(getattr(_plus, "HERO_SMS_API_KEY", "") or "").strip()
+        if not api_key:
+            return {"provider": provider, "ok": True, "balance": None,
+                    "message": "未配置 HERO_SMS_API_KEY，跳过接码预检", "checks": []}
+        try:
+            client = _hero_client()
+            balance = client.get_balance()
+        except Exception as exc:
+            return {"provider": provider, "ok": False, "balance": None,
+                    "message": f"HeroSMS 预检失败：{type(exc).__name__}: {str(exc)[:120]}", "checks": []}
+        ok = balance is not None and balance > 0
+        return {"provider": provider, "ok": ok, "balance": balance,
+                "message": f"HeroSMS 余额 {balance}" if balance is not None else "HeroSMS 余额响应异常",
+                "checks": []}
+
+    if provider == "grizzly":
+        api_key = str(getattr(_cfg, "SMS_API_KEY", "") or "").strip()
+        if not api_key:
+            return {"provider": provider, "ok": True, "balance": None,
+                    "message": "未配置 SMS_API_KEY，跳过接码预检", "checks": []}
+        http = _http()
+        try:
+            text = _request_grizzly(http, {"action": "getBalance"})
+        except SmsNoBalanceError as exc:
+            return {"provider": provider, "ok": False, "balance": 0.0,
+                    "message": str(exc), "checks": []}
+        finally:
+            http.close()
+        if text.startswith("ACCESS_BALANCE:"):
+            raw = text.split(":", 1)[1].strip()
+            try:
+                balance = float(raw)
+            except ValueError:
+                balance = None
+            ok = balance is not None and balance > 0
+            return {"provider": provider, "ok": ok, "balance": balance,
+                    "message": f"余额 {balance}" if balance is not None else f"余额响应异常：{text[:80]}",
+                    "checks": []}
+        return {"provider": provider, "ok": False, "balance": None,
+                "message": f"getBalance 非预期响应：{text[:120]}", "checks": []}
+
+    # provider = l / h
+    if provider == "l":
+        base = str(getattr(_cfg, "L_API_BASE", "") or "").strip()
+        token = str(getattr(_cfg, "L_ADMIN_AUTH_CODE", "") or "").strip()
+        label = "L"
+    elif provider == "h":
+        base = str(getattr(_cfg, "H_API_BASE", "") or "").strip()
+        token = str(getattr(_cfg, "H_ADMIN_AUTH_CODE", "") or "").strip()
+        label = "H"
+    else:
+        return {"provider": provider, "ok": True, "balance": None,
+                "message": f"未知 SMS_PROVIDER={provider!r}，跳过接码预检", "checks": []}
+
+    if not base or not token:
+        return {"provider": provider, "ok": True, "balance": None,
+                "message": f"未配置 {label}_API_BASE/{label}_ADMIN_AUTH_CODE，跳过接码预检", "checks": []}
+    missing = [
+        name for name, value in (("SMS_SERVICE", _cfg.SMS_SERVICE), ("SMS_COUNTRY", _cfg.SMS_COUNTRY))
+        if not str(value or "").strip()
+    ]
+    if missing:
+        return {"provider": provider, "ok": False, "balance": None,
+                "message": f"{label} 配置不完整，缺少 {', '.join(missing)}", "checks": []}
+    ok, message = _probe_reachable(base, label)
+    return {"provider": provider, "ok": ok, "balance": None,
+            "message": message, "checks": []}

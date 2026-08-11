@@ -81,7 +81,11 @@ Thumbs.db
 .env
 .env.*
 !.env.example
-webui.log
-webui.pid
-logs/
-run/
+
+# 备份文件
+*.bak
+*.bak-*
+
+# 浏览器导出的真实会话凭证（含 ois1.* token），绝不入库
+Default-all-domains-*.json
+core/outlook_client.py.bak_pre_spa_fallback

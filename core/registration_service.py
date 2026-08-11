@@ -92,9 +92,16 @@ def _append_job_log(job_id: int, message: str) -> None:
 
 def _random_display_name() -> str:
     """生成符合 OpenAI 限制的英文字母显示名。"""
-    from core.name_samples import random_display_name
+    import random
+    import string
 
-    return random_display_name()
+    first = random.choice(string.ascii_uppercase) + "".join(
+        random.choices(string.ascii_lowercase, k=random.randint(3, 6))
+    )
+    last = random.choice(string.ascii_uppercase) + "".join(
+        random.choices(string.ascii_lowercase, k=random.randint(3, 6))
+    )
+    return f"{first} {last}"
 
 
 def _prepare_registration_args() -> tuple[str, str, str]:
@@ -319,6 +326,10 @@ def _run_one_job(job_id: int, log_file: str) -> None:
                     email=result.get("email"),
                     account_id=result.get("account_id"),
                     completed_at=datetime.now().isoformat(timespec="seconds"),
+                    extra={
+                        "gcash_phone": result.get("gcash_phone"),
+                        "gcash_status": result.get("gcash_status"),
+                    },
                 )
                 log_logger.info(f"[Job {job_id}] 成功: {result.get('email')}")
             else:

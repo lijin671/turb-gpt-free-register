@@ -5,10 +5,13 @@ Sentinel Token 生成模块
 
 核心逻辑：
 1. 生成 `p` 字段（浏览器指纹数据，base64编码的 JSON 数组）
-2. 发送 POST 请求到 sentinel.openai.com/backend-api/sentinel/req
+2. 发送 POST 请求到 {SENTINEL_REQ_URL}（config.openai_protocol，默认 sentinel.openai.com）
 3. 解析响应中的 token、turnstile、proofofwork
 4. 计算 Proof of Work（FNV-1a 哈希）
 5. 组装最终的 openai-sentinel-token 请求头值
+
+req 端点见 config.openai_protocol.SENTINEL_REQ_URL（默认 sentinel.openai.com，
+可通过 SENTINEL_REQ_ORIGIN 覆盖为 chatgpt.com 等）。
 """
 import json
 import time
@@ -103,7 +106,8 @@ def generate_fingerprint_data(device_id: str, attempt: int = 1, elapsed_ms: floa
     window_keys = list(profile.get("window_key_samples") or WINDOW_KEY_SAMPLES)
     window_flags = dict(WINDOW_FEATURE_FLAGS)
     window_flags.update(profile.get("window_feature_flags") or {})
-    script_src_samples = list(profile.get("script_src_samples") or [f"https://sentinel.openai.com/sentinel/{SENTINEL_SV}/sdk.js"])
+    from core.sentinel_sdk import script_src_for_version
+    script_src_samples = list(profile.get("script_src_samples") or [script_src_for_version(SENTINEL_SV)])
 
     config = [
         screen_width + screen_height,       # [0] screen.width + screen.height

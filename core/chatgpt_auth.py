@@ -20,6 +20,76 @@ _PASSKEY_CLIENT_CAPABILITIES = "11111"
 _CC_CAPS = "login_methods"
 
 
+def _generate_pkce() -> tuple[str, str]:
+    """生成 PKCE code_verifier / code_challenge（S256）。"""
+    import base64
+    import hashlib
+    import secrets
+
+    code_verifier = base64.urlsafe_b64encode(secrets.token_bytes(64)).rstrip(b"=").decode("ascii")
+    digest = hashlib.sha256(code_verifier.encode("ascii")).digest()
+    code_challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+    return code_verifier, code_challenge
+
+
+def build_direct_authorize_url(session: BrowserSession, email: str) -> str:
+    """直接构造 auth.openai.com/api/accounts/authorize URL（短路径）。
+
+    参考 sleep-reg gpt_register.py _chatgpt_web_authorize：不经过 chatgpt.com
+    NextAuth CSRF/signin 握手，适用于 chatgpt.com 认证端点被区域/风控阻断的场景。
+
+    与 signin_openai 返回的 authorize URL 等价：携带 login_hint + screen_hint
+    =login_or_signup，follow_authorize 后同样会落到 /email-verification 并触发 OTP。
+
+    Args:
+        session: 浏览器会话（提供 device_id / auth_session_logging_id）
+        email: 注册邮箱（login_hint）
+
+    Returns:
+        authorize URL 字符串；PKCE verifier 保存在 session.pkce_code_verifier
+    """
+    import secrets as _secrets
+    from urllib.parse import urlencode
+
+    from config.openai_protocol import (
+        OPENAI_AUDIENCE,
+        OPENAI_CLIENT_ID,
+        OPENAI_REDIRECT_URI,
+        OPENAI_SCOPE,
+    )
+
+    code_verifier, code_challenge = _generate_pkce()
+    session.pkce_code_verifier = code_verifier
+
+    def _rand(length: int) -> str:
+        alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+        return "".join(_secrets.choice(alphabet) for _ in range(length))
+
+    params = {
+        "issuer": "https://auth.openai.com",
+        "client_id": OPENAI_CLIENT_ID,
+        "scope": OPENAI_SCOPE,
+        "response_type": "code",
+        "redirect_uri": OPENAI_REDIRECT_URI,
+        "audience": OPENAI_AUDIENCE,
+        "device_id": session.device_id,
+        "prompt": "login",
+        "ext-oai-did": session.device_id,
+        "auth_session_logging_id": session.auth_session_logging_id,
+        "screen_hint": "login_or_signup",
+        "login_hint": email,
+        "ccaps": "login_methods",
+        "max_age": "0",
+        "response_mode": "query",
+        "state": _rand(32),
+        "nonce": _rand(32),
+        "code_challenge": code_challenge,
+        "code_challenge_method": "S256",
+        "auth0Client": "eyJuYW1lIjoiYXV0aDAtc3BhLWpzIiwidmVyc2lvbiI6IjEuMjEuMCJ9",
+    }
+    return "https://auth.openai.com/api/accounts/authorize?" + urlencode(params)
+
+
 def _ensure_authorize_context(authorize_url: str, session: BrowserSession, email: str) -> str:
     """
     对 NextAuth 返回的 authorize URL 做最后兜底：确保当前前端默认

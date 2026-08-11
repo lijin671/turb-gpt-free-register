@@ -75,6 +75,12 @@ from config.openai_protocol import (
     OPENAI_AUDIENCE,
     OPENAI_REDIRECT_URI,
     SENTINEL_SV,
+    SENTINEL_REQ_ORIGIN,
+    SENTINEL_REQ_URL,
+    SENTINEL_SDK_BOOTSTRAP_URL,
+    SENTINEL_SDK_CDN_HOSTS,
+    SENTINEL_SDK_AUTO_UPDATE,
+    SENTINEL_SDK_TTL_SECONDS,
     OPENAI_BUILD_ID,
     OAI_CLIENT_BUILD_NUMBER,
     OAI_CLIENT_VERSION,
@@ -111,8 +117,6 @@ from config.register import (
     REGISTER_EMAIL,
     REGISTER_PASSWORD,
     REGISTER_NAME,
-    AUTO_PLAN_CHECK_AFTER_REGISTER,
-    POST_REGISTER_DWELL_SECONDS_RANGE,
 )
 
 # ---------- 邮箱服务 ----------
@@ -121,6 +125,8 @@ from config.email import (
     EMAIL_SOURCE,
     OUTLOOK_ACCOUNTS_FILE,
     OUTLOOK_API_BASE,
+    OUTLOOK_ALIAS,
+    OUTLOOK_ALIAS_REUSE_ON_SUCCESS,
     OTP_POLL_INTERVAL,
     OTP_MAX_WAIT,
     OTP_SETTLE_SECONDS,
@@ -151,6 +157,9 @@ from config.email import (
     CLOUDMAIL_DOMAINS,
     CLOUDMAIL_AUTO_ADD_USER,
     CLOUDMAIL_RANDOM_LOCAL_LENGTH,
+    MANYMAIL_API_BASE,
+    MANYMAIL_DOMAINS,
+    MANYMAIL_RANDOM_LOCAL_LENGTH,
 )
 
 # ---------- 2FA ----------
@@ -176,9 +185,9 @@ _RELOADABLE_SUBMODULES = (
     "config.browser_use",
     "config.skyvern",
     "config.flow_trigger",
+    "config.plus",
     "config.codex",
     "config.extract_link",
-    "config.sub2api",
     "config.humanize",
 )
 
@@ -209,9 +218,9 @@ def reload_all() -> list[str]:
 def _refresh_top_level_constants() -> None:
     """把刚 reload 的子模块的常量重新拷一份到 config 包顶层。"""
     import config as _self
-    from config import browser, openai_protocol, proxy as _proxy, register, email, twofa, roxybrowser, cloakbrowser, browser_use, skyvern, codex, extract_link, sub2api, humanize, flow_trigger
+    from config import browser, openai_protocol, proxy as _proxy, register, email, twofa, roxybrowser, cloakbrowser, browser_use, skyvern, codex, extract_link, humanize, flow_trigger, plus
     # 简单粗暴：枚举一遍重要常量，覆盖到 _self
-    for src in (browser, openai_protocol, _proxy, register, email, twofa, roxybrowser, cloakbrowser, browser_use, skyvern, codex, extract_link, sub2api, humanize, flow_trigger):
+    for src in (browser, openai_protocol, _proxy, register, email, twofa, roxybrowser, cloakbrowser, browser_use, skyvern, codex, extract_link, humanize, flow_trigger, plus):
         for k in dir(src):
             if k.isupper() or k in ("pick_proxy", "pick_browser_profile", "build_browser_environment", "validate_browser_profile"):
                 setattr(_self, k, getattr(src, k))
@@ -235,7 +244,10 @@ __all__ = [
     "IMPERSONATE", "REQUEST_TIMEOUT",
     # openai_protocol
     "OPENAI_CLIENT_ID", "OPENAI_SCOPE", "OPENAI_AUDIENCE", "OPENAI_REDIRECT_URI",
-    "SENTINEL_SV", "OPENAI_BUILD_ID", "OAI_CLIENT_BUILD_NUMBER", "OAI_CLIENT_VERSION",
+    "SENTINEL_SV", "SENTINEL_REQ_ORIGIN", "SENTINEL_REQ_URL",
+    "SENTINEL_SDK_BOOTSTRAP_URL", "SENTINEL_SDK_CDN_HOSTS",
+    "SENTINEL_SDK_AUTO_UPDATE", "SENTINEL_SDK_TTL_SECONDS",
+    "OPENAI_BUILD_ID", "OAI_CLIENT_BUILD_NUMBER", "OAI_CLIENT_VERSION",
     "STATSIG_CLIENT_KEY", "STATSIG_SDK_VERSION", "STATSIG_SDK_TYPE", "AB_CLIENT_KEY", "AB_SDK_VERSION",
     "SEND_SENTINEL_ON_EMAIL_OTP_VALIDATE", "CHATGPT_ANON_BOOTSTRAP_ENABLED", "CHATGPT_AUTH_BOOTSTRAP_ENABLED", "CHATGPT_BOOTSTRAP_STRICT",
     # proxy
@@ -247,7 +259,7 @@ __all__ = [
     "REGISTER_EMAIL", "REGISTER_PASSWORD", "REGISTER_NAME",
     # email
     "USE_EMAIL_SERVICE", "EMAIL_SOURCE",
-    "OUTLOOK_ACCOUNTS_FILE", "OUTLOOK_API_BASE",
+    "OUTLOOK_ACCOUNTS_FILE", "OUTLOOK_API_BASE", "OUTLOOK_ALIAS", "OUTLOOK_ALIAS_REUSE_ON_SUCCESS",
     "OTP_POLL_INTERVAL", "OTP_MAX_WAIT", "OTP_SETTLE_SECONDS",
     "EMAIL_DOMAIN", "QQ_IMAP_SERVER", "QQ_IMAP_PORT", "QQ_EMAIL", "QQ_IMAP_PASSWORD",
     "GPTMAIL_API_KEY", "MAIL_NEST_API_KEY", "MAIL_NEST_PROJECT_CODE",
@@ -258,6 +270,7 @@ __all__ = [
     "CLOUDMAIL_API_BASE", "CLOUDMAIL_ADMIN_EMAIL", "CLOUDMAIL_PASSWORD", "CLOUDMAIL_TOKEN_PATH",
     "CLOUDMAIL_AUTH_TOKEN", "CLOUDMAIL_DOMAINS",
     "CLOUDMAIL_AUTO_ADD_USER", "CLOUDMAIL_RANDOM_LOCAL_LENGTH",
+    "MANYMAIL_API_BASE", "MANYMAIL_DOMAINS", "MANYMAIL_RANDOM_LOCAL_LENGTH",
     # twofa
     "ENABLE_2FA",
 ]
