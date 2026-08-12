@@ -423,6 +423,8 @@ def save_account_data(
     proxy_used: str | None = None,
     batch_dir: Path | None = None,
     auto_plan_check: bool | None = None,
+    ip_key: str | None = None,
+    exit_ip: str | None = None,
 ) -> int:
     """
     将账号信息保存到本地 JSON/TXT 文件存储。

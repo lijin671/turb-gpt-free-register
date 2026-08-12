@@ -2,7 +2,11 @@
 """注册后自动导出到 ChatGPT-to-API 的配置。"""
 from config.env_loader import apply_env_overrides
 
-# ChatGPT-to-API access_tokens.json 路径（{email: {token, puid}}）
+# chatgpt2api 容器 HTTP API 配置（主路径）
+CHATGPT2API_API_BASE: str = "http://127.0.0.1:3001"
+CHATGPT2API_AUTH_KEY: str = "Iq43lk6czc464qlAaV3N4QswsbkLaAdZ4pZopwGDI3o"
+
+# ChatGPT-to-API access_tokens.json 路径（备份路径）
 CHATGPT2API_TOKENS_FILE: str = "/home/zzx/research-repos/ChatGPT-to-API/access_tokens.json"
 
 # 注册成功后是否立即写入 access_tokens.json（token 寿命短，必须趁热导入）
@@ -36,6 +40,8 @@ CPA_IMPORT_VERIFY_MODELS: bool = True
 AUTO_REIMPORT_AFTER_REVIVE: bool = True
 
 apply_env_overrides(globals(), {
+    'CHATGPT2API_API_BASE': 'str',
+    'CHATGPT2API_AUTH_KEY': 'str',
     'CHATGPT2API_TOKENS_FILE': 'str',
     'AUTO_EXPORT_TO_CHATGPT2API': 'bool',
     'AUTO_EXPORT_PROXIES_TXT': 'bool',
