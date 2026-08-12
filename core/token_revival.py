@@ -63,6 +63,8 @@ def revive_account(email: str, otp_code: str | None = None, *, session=None) -> 
                 session.blocked_reason = ""
                 session.cf_challenge_count = 0
                 from urllib.parse import urlencode
+                # 不用 reauth=password（直接 authorize 不支持，会返回 error）
+                # 改为 screen_hint=login_or_signup 触发 email-verification 流程
                 authorize_params = {
                     "client_id": "app_X8zY6vW2pQ9tR3dE7nK1jL5gH",
                     "scope": "openid email profile offline_access model.request model.read organization.read organization.write",
@@ -70,12 +72,8 @@ def revive_account(email: str, otp_code: str | None = None, *, session=None) -> 
                     "redirect_uri": "https://chatgpt.com/api/auth/callback/openai",
                     "audience": "https://api.openai.com/v1",
                     "device_id": device_id,
-                    "connection": "password",
                     "login_hint": email,
-                    "reauth": "password",
-                    "max_age": "0",
                     "ext-oai-did": device_id,
-                    "prompt": "login",
                     "screen_hint": "login_or_signup",
                 }
                 auth_url = "https://auth.openai.com/api/accounts/authorize?" + urlencode(authorize_params)
