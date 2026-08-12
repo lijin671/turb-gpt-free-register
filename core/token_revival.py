@@ -18,7 +18,7 @@ import time
 logger = logging.getLogger(__name__)
 
 
-def revive_account(email: str, otp_code: str | None = None, *, session=None) -> dict:
+def revive_account(email: str, otp_code: str | None = None, *, session=None, retry_count: int = 0) -> dict:
     """复活单个账号 token。
 
     Args:
@@ -49,36 +49,55 @@ def revive_account(email: str, otp_code: str | None = None, *, session=None) -> 
 
     own_session = session is None
     session = session or BrowserSession(proxy=proxy, detect_exit_geo=False, device_id=device_id or None)
+
+    # 预检 auth.openai.com 可达性 — 如果 CF 403 则换代理（和注册流程 network_preflight 一致）
+    for _ in range(3):
+        try:
+            preflight_resp = session.get(
+                "https://auth.openai.com/log-in",
+                headers=session.get_auth_navigate_headers(referer="https://chatgpt.com/login"),
+                allow_redirects=True,
+            )
+            if getattr(preflight_resp, "status_code", 0) < 400:
+                break
+            # CF 403 → 换代理
+            logger.warning("[复活] auth.openai.com 预检 HTTP %s，换代理重试...", preflight_resp.status_code)
+            session.blocked_until = 0
+            session.blocked_reason = ""
+            session.cf_challenge_count = 0
+            from config.proxy import pick_proxy
+            new_proxy = pick_proxy()
+            if new_proxy and new_proxy != proxy:
+                proxy = new_proxy
+                session.proxy = new_proxy
+                session.session.proxies = {"http": new_proxy, "https": new_proxy}
+                logger.info("[复活] 换代理: %s...", new_proxy[:50])
+            else:
+                break
+        except Exception as pf_exc:
+            logger.warning("[复活] 预检失败: %s，换代理重试...", pf_exc)
+            session.blocked_until = 0
+            session.blocked_reason = ""
+            session.cf_challenge_count = 0
+            from config.proxy import pick_proxy
+            new_proxy = pick_proxy()
+            if new_proxy and new_proxy != proxy:
+                proxy = new_proxy
+                session.proxy = new_proxy
+                session.session.proxies = {"http": new_proxy, "https": new_proxy}
+                logger.info("[复活] 换代理: %s...", new_proxy[:50])
+            else:
+                break
+
     try:
         reauth_otp_after_ts = time.time()
         logger.info("[复活] %s 发起重认证（proxy=%s device_id=%s）", email, proxy or "-", device_id or "-")
-        try:
-            auth_url = _trigger_reauth(session, email)
-        except Exception as trigger_exc:
-            # chatgpt.com/api/auth/csrf 被 CF 403 拦截时，直接走 auth.openai.com authorize
-            if "403" in str(trigger_exc) or "CF" in str(trigger_exc).upper():
-                logger.warning("[复活] chatgpt.com CSRF 403，改为直接走 auth.openai.com authorize")
-                # 重置熔断，让后续 auth.openai.com 请求能通过
-                session.blocked_until = 0
-                session.blocked_reason = ""
-                session.cf_challenge_count = 0
-                from urllib.parse import urlencode
-                # 不用 reauth=password（直接 authorize 不支持，会返回 error）
-                # 改为 screen_hint=login_or_signup 触发 email-verification 流程
-                authorize_params = {
-                    "client_id": "app_X8zY6vW2pQ9tR3dE7nK1jL5gH",
-                    "scope": "openid email profile offline_access model.request model.read organization.read organization.write",
-                    "response_type": "code",
-                    "redirect_uri": "https://chatgpt.com/api/auth/callback/openai",
-                    "audience": "https://api.openai.com/v1",
-                    "device_id": device_id,
-                    "login_hint": email,
-                    "ext-oai-did": device_id,
-                    "screen_hint": "login_or_signup",
-                }
-                auth_url = "https://auth.openai.com/api/accounts/authorize?" + urlencode(authorize_params)
-            else:
-                raise
+
+        # 直接走 build_direct_authorize_url（绕过 chatgpt.com CF 403 问题）
+        # 这和注册流程的降级路径一致，走 auth.openai.com 短路径
+        from core.chatgpt_auth import build_direct_authorize_url
+        auth_url = build_direct_authorize_url(session, email)
+        logger.info("[复活] 使用 build_direct_authorize_url 短路径（绕过 chatgpt.com CF）")
         human_delay("api")
         _follow_reauth(session, auth_url)
         human_delay("navigate")
@@ -111,6 +130,10 @@ def revive_account(email: str, otp_code: str | None = None, *, session=None) -> 
                 return {"ok": False, "email": email, "message": "等待重认证 OTP 超时"}
         human_delay("otp_input")
 
+        # 重置熔断（OTP 提交可能因 CF 临时 403 被熔断）
+        session.blocked_until = 0
+        session.blocked_reason = ""
+        session.cf_challenge_count = 0
         continue_url = _validate_reauth_otp(session, otp_code)
         human_delay("api")
         new_token = _exchange_new_token(session, continue_url)
@@ -159,6 +182,22 @@ def revive_account(email: str, otp_code: str | None = None, *, session=None) -> 
             "message": "token 复活成功",
         }
     except Exception as exc:
+        exc_str = str(exc)
+        # 如果是 CF 403 / 连接超时，换代理重试（最多 2 次）
+        if ("403" in exc_str or "404" in exc_str or "timeout" in exc_str.lower() or 
+            "CONNECT tunnel failed" in exc_str or "504" in exc_str):
+            if retry_count < 2:
+                logger.warning("[复活] %s 失败（%s），换代理重试 (%d/2)...", email, type(exc).__name__, retry_count + 1)
+                if own_session:
+                    try:
+                        session.close()
+                    except Exception:
+                        pass
+                # 换新代理重试
+                from config.proxy import pick_proxy
+                new_proxy = pick_proxy()
+                new_session = BrowserSession(proxy=new_proxy, detect_exit_geo=False, device_id=device_id or None)
+                return revive_account(email, otp_code=None, session=new_session, retry_count=retry_count + 1)
         logger.warning("[复活] %s 失败：%s: %s", email, type(exc).__name__, exc)
         return {"ok": False, "email": email, "message": f"{type(exc).__name__}: {exc}"}
     finally:
