@@ -58,6 +58,28 @@ def revive_account(email: str, otp_code: str | None = None, *, session=None) -> 
         human_delay("navigate")
 
         if otp_code is None:
+            # 恢复 manymail 进程内上下文（独立进程时 _CONTEXT_CACHE 为空）
+            try:
+                from core.email_provider import resolve_email_source
+                email_source = resolve_email_source(email)
+                if email_source == "manymail":
+                    from core.manymail_client import get_account_context, restore_context
+                    ctx = get_account_context(email)
+                    if ctx is None:
+                        # 从 DB 的 extra_json 中恢复 password
+                        import json as _json
+                        extra_raw = acc.get("extra_json", "")
+                        extra = _json.loads(extra_raw) if extra_raw else {}
+                        # manymail 凭据存在 extra['manymail']['password']
+                        mm_creds = extra.get("manymail", {})
+                        password = mm_creds.get("password", "") if isinstance(mm_creds, dict) else ""
+                        if password:
+                            restore_context(email, password=password)
+                            logger.info("[复活] 已恢复 manymail 上下文: %s", email)
+                        else:
+                            logger.warning("[复活] manymail 密码缺失，无法恢复上下文: %s", email)
+            except Exception as exc:
+                logger.warning("[复活] 恢复 manymail 上下文失败: %s", exc)
             otp_code = wait_for_otp(email, after_ts=reauth_otp_after_ts)
             if not otp_code:
                 return {"ok": False, "email": email, "message": "等待重认证 OTP 超时"}

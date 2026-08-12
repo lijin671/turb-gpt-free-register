@@ -529,6 +529,18 @@ def _maybe_register_gcash(email: str, result: dict) -> dict:
     return result
 
 
+def _collect_manymail_creds(email: str) -> dict:
+    """从 manymail 进程内缓存提取凭据，供后续 token 复活使用。"""
+    try:
+        from core.manymail_client import get_account_context
+        ctx = get_account_context(email)
+        if ctx:
+            return {"email": ctx.email, "password": ctx.password, "token": ctx.token, "domain": ctx.domain}
+    except Exception:
+        pass
+    return {}
+
+
 def run_registration(
     email: str,
     name: str,
@@ -1071,6 +1083,7 @@ def _run_registration_impl(
                 "expires": session_info.get("expires"),
                 "device_id": session.device_id,
                 "password": registration_password,
+            "manymail": _collect_manymail_creds(email),
                 "sentinel_sid": getattr(session, "sentinel_sid", None),
                 "browser_profile": getattr(session, "browser_profile", None),
                 "codex": codex_result,
