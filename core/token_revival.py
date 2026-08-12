@@ -52,7 +52,35 @@ def revive_account(email: str, otp_code: str | None = None, *, session=None) -> 
     try:
         reauth_otp_after_ts = time.time()
         logger.info("[复活] %s 发起重认证（proxy=%s device_id=%s）", email, proxy or "-", device_id or "-")
-        auth_url = _trigger_reauth(session, email)
+        try:
+            auth_url = _trigger_reauth(session, email)
+        except Exception as trigger_exc:
+            # chatgpt.com/api/auth/csrf 被 CF 403 拦截时，直接走 auth.openai.com authorize
+            if "403" in str(trigger_exc) or "CF" in str(trigger_exc).upper():
+                logger.warning("[复活] chatgpt.com CSRF 403，改为直接走 auth.openai.com authorize")
+                # 重置熔断，让后续 auth.openai.com 请求能通过
+                session.blocked_until = 0
+                session.blocked_reason = ""
+                session.cf_challenge_count = 0
+                from urllib.parse import urlencode
+                authorize_params = {
+                    "client_id": "app_X8zY6vW2pQ9tR3dE7nK1jL5gH",
+                    "scope": "openid email profile offline_access model.request model.read organization.read organization.write",
+                    "response_type": "code",
+                    "redirect_uri": "https://chatgpt.com/api/auth/callback/openai",
+                    "audience": "https://api.openai.com/v1",
+                    "device_id": device_id,
+                    "connection": "password",
+                    "login_hint": email,
+                    "reauth": "password",
+                    "max_age": "0",
+                    "ext-oai-did": device_id,
+                    "prompt": "login",
+                    "screen_hint": "login_or_signup",
+                }
+                auth_url = "https://auth.openai.com/api/accounts/authorize?" + urlencode(authorize_params)
+            else:
+                raise
         human_delay("api")
         _follow_reauth(session, auth_url)
         human_delay("navigate")
