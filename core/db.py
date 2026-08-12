@@ -695,6 +695,24 @@ def update_account_codex_status(email: str, codex_status: str, codex_error: str 
         return True
 
 
+def update_account_access_token(email: str, access_token: str, note: str = "") -> bool:
+    """更新某账号的 access_token（token 复活时用）。
+
+    返回是否找到该账号。
+    """
+    with _LOCK:
+        accounts = _load_accounts()
+        row = _find_by_email(accounts, email)
+        if row is None:
+            return False
+        row["access_token"] = access_token
+        if note:
+            row["note"] = note
+        row["updated_at"] = _now()
+        _save_accounts(accounts)
+        return True
+
+
 def claim_account_codex_agent(acc_id: int, trigger: str = "manual") -> bool:
     """原子占用账号 Codex Agent Token 生成任务；已有未超时任务时返回 False。"""
     with _LOCK:
