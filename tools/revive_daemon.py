@@ -29,6 +29,40 @@ logging.basicConfig(
 logger = logging.getLogger("revive_daemon")
 
 
+def run_one_with_retry(email: str, max_retries: int = 3) -> dict:
+    """对单个账号执行 token 复活，403 时换代理重试。"""
+    from core import db
+    from core.token_revival import revive_account
+    from config.proxy import pick_proxy
+
+    for attempt in range(max_retries):
+        try:
+            res = revive_account(email)
+            if res.get("ok"):
+                return res
+            # 403 时换代理重试
+            msg = str(res.get("message", ""))
+            if "403" in msg or "CF" in msg or "challenge" in msg.lower():
+                new_proxy = pick_proxy()
+                logger.info("[Revive] %s 第 %d 次遇到 403，换代理重试: %s...", email, attempt + 1, new_proxy[:50])
+                # 更新 DB 中的 proxy_used
+                acc = db.get_account_by_email(email)
+                if acc and new_proxy:
+                    # 直接修改 proxy_used 并重试
+                    db.update_account_proxy(email, new_proxy)
+                    continue
+            return res
+        except Exception as e:
+            msg = str(e)
+            if "403" in msg or "CF" in msg:
+                new_proxy = pick_proxy()
+                logger.info("[Revive] %s 第 %d 次异常 403，换代理重试: %s...", email, attempt + 1, new_proxy[:50])
+                db.update_account_proxy(email, new_proxy)
+                continue
+            raise
+    return {"ok": False, "email": email, "message": f"重试 {max_retries} 次后仍失败"}
+
+
 def run_once(limit: int) -> dict:
     """执行一轮 token 复活。返回 {scanned, revived, failed, skipped}。"""
     from core import db
@@ -47,7 +81,7 @@ def run_once(limit: int) -> dict:
     for a in candidates:
         email = a.get("email", "")
         try:
-            res = revive_account(email)
+            res = run_one_with_retry(email)
             if res.get("ok"):
                 logger.info("[Revive] ✅ %s: %s", email, res.get("message", ""))
                 result["revived"] += 1
