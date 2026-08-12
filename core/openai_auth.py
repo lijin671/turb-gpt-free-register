@@ -19,6 +19,13 @@ from core.sentinel_sdk import current_sentinel_sv, ensure_sentinel_sdk
 
 logger = logging.getLogger(__name__)
 
+# FlareSolverr clearance 集成（CF 403 自动过墙）
+try:
+    from core.flaresolverr_clearance import get_clearance, apply_clearance_to_session
+except ImportError:
+    get_clearance = None
+    apply_clearance_to_session = None
+
 
 class EmailOtpInvalidError(RuntimeError):
     """邮箱验证码无效/过期，可重新发送后重试。"""
@@ -148,13 +155,46 @@ def _is_transient_network_error(exc: Exception) -> bool:
     return any(k in msg for k in transient_keywords)
 
 
+def _try_flaresolverr_clearance(session: BrowserSession, target_url: str, proxy_url: str = "") -> bool:
+    """遇到 CF 403 时调 FlareSolverr 获取 clearance cookie 并注入 session。
+
+    Returns True 如果成功获取并注入了 clearance。
+    """
+    if get_clearance is None:
+        logger.debug("[FlareSolverr] 模块未加载，跳过 clearance")
+        return False
+    try:
+        bundle = get_clearance(target_url, proxy_url)
+        if bundle is None:
+            logger.warning("[FlareSolverr] 未获取到 clearance")
+            return False
+        apply_clearance_to_session(session, bundle)
+        logger.info("[FlareSolverr] clearance 已注入 session，重试请求")
+        return True
+    except Exception as exc:
+        logger.warning("[FlareSolverr] clearance 获取异常: %s: %s", type(exc).__name__, exc)
+        return False
+
+
+def _get_session_proxy_url(session: BrowserSession) -> str:
+    """从 BrowserSession 获取当前代理 URL。"""
+    proxy = getattr(session, "proxy", "") or ""
+    if not proxy:
+        proxy = getattr(session, "_proxy", "") or ""
+    return str(proxy).strip()
+
+
 def network_preflight(session: BrowserSession) -> None:
     """
     注册前网络预检：只建立边缘节点/cookie/基础连通性，不携带邮箱、不触发 OTP。
 
-    这样真正会“烧邮箱”的 authorize 重定向发生前，已经确认当前代理、TLS
+    这样真正会"烧邮箱"的 authorize 重定向发生前，已经确认当前代理、TLS
     impersonate、ChatGPT/Auth/Sentinel 三段链路都可达。
+
+    CF 403 处理：如果预检请求返回 403 且响应体含 Cloudflare challenge 特征，
+    自动调 FlareSolverr 获取 cf_clearance cookie 注入 session 后重试。
     """
+    proxy_url = _get_session_proxy_url(session)
     checks = [
         ("chatgpt-login", lambda: session.get(
             "https://chatgpt.com/login",
@@ -174,12 +214,53 @@ def network_preflight(session: BrowserSession) -> None:
     ]
     for label, fn in checks:
         last_exc = None
+        clearance_attempted = False
         for attempt in range(1, _FOLLOW_AUTH_MAX_ATTEMPTS + 1):
             try:
                 logger.info(f"[预检] {label} ({attempt}/{_FOLLOW_AUTH_MAX_ATTEMPTS})")
                 resp = fn()
-                if getattr(resp, "status_code", 0) >= 400:
-                    raise RuntimeError(f"{label} status={resp.status_code}, body={(getattr(resp, 'text', '') or '')[:180]}")
+                status = getattr(resp, "status_code", 0)
+                if status >= 400:
+                    # 检查是否是 CF challenge（403 + "just a moment" 等）
+                    body_text = str(getattr(resp, "text", "") or "").lower()
+                    is_cf = status in (403, 503) and (
+                        "just a moment" in body_text
+                        or "cf-chl-" in body_text
+                        or "__cf_chl_" in body_text
+                        or "challenge-platform" in body_text
+                    )
+                    # chatgpt-login 的 403 直接跳过（注册流程走 auth.openai.com，不经过 chatgpt.com）
+                    # 这是 curl_cffi TLS 指纹被 CF 识别的问题，不是 CF challenge
+                    if label == "chatgpt-login" and status == 403:
+                        logger.warning(f"[预检] {label} 返回 HTTP {status}（TLS 指纹拦截），注册走 auth.openai.com，跳过此步")
+                        session.blocked_until = 0
+                        session.blocked_reason = ""
+                        break
+                    # auth-login / sentinel 的 CF challenge → 换代理（新出口 IP）重试
+                    # FlareSolverr 的 Chrome 能过但 curl_cffi TLS 指纹可能过不了同一 IP，
+                    # 所以最优策略是换一个不拦 CF 的出口 IP
+                    if is_cf:
+                        logger.warning(f"[预检] {label} 遇到 CF challenge (HTTP {status})，换代理重试...")
+                        # 重置熔断
+                        session.blocked_until = 0
+                        session.blocked_reason = ""
+                        # 换新代理（新 sid = 新出口 IP）
+                        try:
+                            from config.proxy import pick_proxy
+                            new_proxy = pick_proxy()
+                            if new_proxy and new_proxy != proxy_url:
+                                logger.info(f"[预检] 换代理: {new_proxy[:50]}...")
+                                # 直接更新 session 的代理
+                                session.proxy = new_proxy
+                                session.session.proxies = {"http": new_proxy, "https": new_proxy}
+                                session.blocked_until = 0
+                                session.blocked_reason = ""
+                                session.cf_challenge_count = 0
+                                proxy_url = new_proxy
+                                continue  # 重试当前 check
+                        except Exception:
+                            pass
+                    raise RuntimeError(f"{label} status={status}, body={body_text[:180]}")
                 break
             except Exception as exc:
                 last_exc = exc
@@ -190,7 +271,6 @@ def network_preflight(session: BrowserSession) -> None:
                 time.sleep(backoff)
         else:
             raise last_exc if last_exc else RuntimeError(f"[预检] {label} 未完成")
-
 
 def is_password_branch_url(url: str) -> bool:
     """
