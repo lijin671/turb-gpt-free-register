@@ -141,7 +141,7 @@ def pick_account() -> ManyMailAccount:
         raise ManyMailError("ManyMail 无可用域名")
     last_exc: Exception | None = None
     for attempt in range(8):
-        domain = domains[attempt % len(domains)]
+        domain = domains[secrets.choice(range(len(domains)))]
         local = _random_local()
         address = f"{local}@{domain}"
         password = _random_password()
