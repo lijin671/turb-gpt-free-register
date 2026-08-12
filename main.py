@@ -1121,6 +1121,39 @@ def _run_registration_impl(
         else:
             logger.warning("[CPA导入] 跳过/失败：%s", cpa_result.get("message"))
 
+        # ==================== 阶段8.7: 消费验证 ====================
+        # 注册+导入成功后，通过 CPA 8317 发一个测试请求验证 token 可用。
+        verify_result = {"ok": False, "message": "未触发"}
+        try:
+            from curl_cffi import requests as _verify_requests
+            _verify_resp = _verify_requests.post(
+                "http://127.0.0.1:8317/v1/chat/completions",
+                headers={
+                    "Authorization": "Bearer sk-cpa-32dee3e75379628dfc66e48e75290c8f86c2ed9f0ccadad1",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "gpt-4o-mini",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "max_tokens": 5,
+                },
+                timeout=30,
+            )
+            if _verify_resp.status_code == 200:
+                _verify_data = _verify_resp.json()
+                if "choices" in _verify_data:
+                    verify_result = {"ok": True, "message": f"CPA 消费验证通过: {_verify_data.get('model','?')}"}
+                    logger.info("[消费验证] ✅ %s", verify_result["message"])
+                else:
+                    verify_result = {"ok": False, "message": f"CPA 返回无 choices: {str(_verify_data)[:120]}"}
+                    logger.warning("[消费验证] ⚠️ %s", verify_result["message"])
+            else:
+                verify_result = {"ok": False, "message": f"HTTP {_verify_resp.status_code}: {_verify_resp.text[:120]}"}
+                logger.warning("[消费验证] ⚠️ %s", verify_result["message"])
+        except Exception as exc:
+            verify_result = {"ok": False, "message": f"{type(exc).__name__}: {exc}"}
+            logger.warning("[消费验证] ⚠️ %s", verify_result["message"])
+
         # ==================== 阶段9: 后置自动触发 flow ====================
         # 只有走完回调、拿到 token 并保存成功的账号，才会触发 flow。
         # flow 请求不影响账号保存状态，但会记录结果并参与批量统计。
