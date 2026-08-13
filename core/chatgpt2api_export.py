@@ -27,7 +27,7 @@ def _atomic_write(path: Path, data) -> None:
     os.replace(tmp, path)
 
 
-def _import_via_api(access_token: str, base_url: str, auth_key: str) -> dict:
+def _import_via_api(access_token: str, base_url: str, auth_key: str, email: str = "") -> dict:
     """通过 chatgpt2api HTTP API 导入账号。
 
     Returns: {"ok": bool, "message": str, "added": int, "total": int}
@@ -43,7 +43,8 @@ def _import_via_api(access_token: str, base_url: str, auth_key: str) -> dict:
         "Content-Type": "application/json",
     }
     payload = {
-        "tokens": [access_token],
+        "accounts": [{"access_token": access_token, "email": email}] if email else [],
+        "tokens": [] if email else [access_token],
         "sync_after_import": True,
         "return_items": False,
     }
@@ -141,7 +142,7 @@ def export_account_to_chatgpt2api(
     api_base = getattr(_cfg, "CHATGPT2API_API_BASE", "") or "http://127.0.0.1:3001"
     api_key = getattr(_cfg, "CHATGPT2API_AUTH_KEY", "") or "Iq43lk6czc464qlAaV3N4QswsbkLaAdZ4pZopwGDI3o"
 
-    api_result = _import_via_api(access_token, api_base, api_key)
+    api_result = _import_via_api(access_token, api_base, api_key, email=email)
 
     # ---- 备份路径：JSON 文件写入 ----
     tokens_file = tokens_file or _cfg.CHATGPT2API_TOKENS_FILE
