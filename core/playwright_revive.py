@@ -184,26 +184,66 @@ async def _playwright_revive_account(
 
             # 确保在 email-verification 页面上
             current_url = page.url
-            if "email-verification" not in current_url and "auth.openai.com" in current_url:
-                # 已经在 auth.openai.com 上，直接 fetch
-                pass
+            logger.info(f"[PW-Revive] {email} 当前页面: {current_url}")
 
-            result = await page.evaluate("""
-                async (otpCode) => {
-                    try {
-                        const resp = await fetch('/api/accounts/email-otp/validate', {
-                            method: 'POST',
-                            headers: {'Content-Type': 'application/json'},
-                            body: JSON.stringify({code: otpCode}),
-                            credentials: 'include'
-                        });
-                        const text = await resp.text();
-                        return {status: resp.status, body: text};
-                    } catch(e) {
-                        return {error: e.toString()};
+            # 导航到 email-verification 页面（确保 CF cookies 对此路径有效）
+            if "email-verification" not in current_url:
+                try:
+                    resp = await page.goto("https://auth.openai.com/email-verification", wait_until="domcontentloaded", timeout=15000)
+                    content = await page.content()
+                    if "Just a moment" in content:
+                        logger.info(f"[PW-Revive] {email} email-verification CF challenge, 等待 15s...")
+                        await page.wait_for_timeout(15000)
+                    logger.info(f"[PW-Revive] {email} 导航到 email-verification, URL: {page.url}")
+                except Exception as nav_exc:
+                    logger.warning(f"[PW-Revive] {email} 导航 email-verification 失败: {nav_exc}")
+
+            # 检查 cookies
+            cookies_before = await context.cookies()
+            cookie_names = [c["name"] for c in cookies_before]
+            logger.info(f"[PW-Revive] {email} POST 前 cookies: {cookie_names}")
+
+            # 主方案: APIRequestContext POST（携带浏览器 cookies + 过 CF）
+            logger.info(f"[PW-Revive] {email} APIRequestContext POST validate...")
+            api_resp = await context.request.post(
+                "https://auth.openai.com/api/accounts/email-otp/validate",
+                data=json.dumps({"code": otp_code}),
+                headers={
+                    "Content-Type": "application/json",
+                    "Referer": "https://auth.openai.com/email-verification",
+                    "Origin": "https://auth.openai.com",
+                },
+            )
+            api_status = api_resp.status
+            api_body = await api_resp.text()
+            logger.info(f"[PW-Revive] {email} APIRequest POST: status={api_status}, body={api_body[:300]}")
+
+            # 判断是否过 CF：CF 403 返回 HTML（Just a moment），API 403 返回 JSON
+            is_cf_403 = api_status == 403 and "Just a moment" in api_body
+            result = {"status": api_status, "body": api_body}
+
+            if is_cf_403:
+                # CF 403 才回退到 JS fetch
+                logger.warning(f"[PW-Revive] {email} APIRequest CF 403, 尝试 JS fetch...")
+                result = await page.evaluate("""
+                    async (otpCode) => {
+                        try {
+                            const resp = await fetch('/api/accounts/email-otp/validate', {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/json',
+                                },
+                                body: JSON.stringify({code: otpCode}),
+                                credentials: 'include',
+                                mode: 'same-origin',
+                            });
+                            const text = await resp.text();
+                            return {status: resp.status, body: text};
+                        } catch(e) {
+                            return {error: e.toString()};
+                        }
                     }
-                }
-            """, otp_code)
+                """, otp_code)
 
             logger.info(f"[PW-Revive] {email} POST validate result: {json.dumps(result, ensure_ascii=False)[:300]}")
 
@@ -268,28 +308,40 @@ async def _playwright_revive_account(
 
 
 async def _wait_otp_manymail(email: str, creds: dict | None, timeout: int = 90) -> str | None:
-    """通过 manymail 收 OTP。"""
+    """通过 manymail 收 OTP。
+
+    需要先恢复 manymail 进程内上下文（get_account_context），
+    然后调用 wait_for_otp 轮询收件箱。
+    """
     if not creds:
         logger.error(f"[PW-Revive] {email} 无 manymail 凭据")
         return None
 
-    from core.email_provider import wait_for_otp
-    from core.session import BrowserSession
-
-    # manymail 收 OTP 用 curl_cffi（不需要过 CF）
     try:
+        # 1. 恢复 manymail 上下文
+        from core.manymail_client import restore_context, get_account_context
+        ctx = get_account_context(email)
+        if ctx is None:
+            password = creds.get("password", "")
+            domain = creds.get("domain", "")
+            if password:
+                restore_context(email, password=password, domain=domain)
+                logger.info(f"[PW-Revive] {email} 已恢复 manymail 上下文")
+            else:
+                logger.error(f"[PW-Revive] {email} manymail 密码缺失")
+                return None
+
+        # 2. 调用 wait_for_otp
+        from core.email_provider import wait_for_otp
         otp = await asyncio.to_thread(
             wait_for_otp,
             email=email,
-            email_source="manymail",
-            manymail_domain=creds.get("domain"),
-            manymail_password=creds.get("password"),
-            manymail_token=creds.get("token"),
-            timeout=timeout,
+            after_ts=time.time() - 5,  # 只接受 5s 内的新 OTP
+            max_wait=timeout,
         )
         return otp
     except Exception as e:
-        logger.error(f"[PW-Revive] {email} OTP 获取失败: {e}")
+        logger.error(f"[PW-Revive] {email} OTP 获取失败: {type(e).__name__}: {e}")
         return None
 
 
