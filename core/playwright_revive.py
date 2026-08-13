@@ -1,19 +1,16 @@
 # -*- coding: utf-8 -*-
-"""Playwright token 复活模块。
+"""Playwright token 复活模块 v2。
 
 用真实 Chromium + resin 代理过 CF challenge，走完整 NextAuth 流程复活 token。
 
 流程：
-1. 启动 Chromium（代理: resin Pokemon/Premium sid）
-2. GET auth.openai.com/log-in → 过 CF challenge（等待 ~10s）
-3. GET authorize URL（PKCE）→ 落到 email-verification → 触发 OTP 发送
+1. GET chatgpt.com/api/auth/csrf → CSRF token
+2. POST chatgpt.com/api/auth/signin/login-openai → authorize URL
+3. GET authorize URL → email-verification → OTP 发送
 4. manymail 收 OTP
-5. JS fetch POST /api/accounts/email-otp/validate → 验证 OTP
-6. GET /api/auth/session → 获取新 accessToken
-
-相比 curl_cffi 的 build_direct_authorize_url：
-- curl_cffi POST validate 被 CF 403（TLS 指纹被识别）
-- Playwright 用真实 Chrome，过 CF 后 JS fetch 自动携带 __cf_bm + cf_clearance
+5. APIRequestContext POST validate → continue_url
+6. page.goto continue_url → chatgpt.com 回调 → session cookie
+7. GET chatgpt.com/api/auth/session → accessToken
 """
 import asyncio
 import json
@@ -33,20 +30,8 @@ async def _playwright_revive_account(
     otp_callback=None,
     timeout: int = 120,
 ) -> dict[str, Any]:
-    """用 Playwright 复活单个账号 token。
-
-    Args:
-        email: 账号邮箱
-        proxy: 代理 URL（http://user:pass@host:port）
-        device_id: 账号的 device_id
-        manymail_creds: manymail 凭据（domain, password, token）
-        otp_callback: 异步函数，接收 email，返回 OTP code
-        timeout: 总超时秒数
-
-    Returns: {"ok": bool, "email": str, "message": str, "access_token": str}
-    """
     from playwright.async_api import async_playwright
-    from urllib.parse import urlparse, urlencode
+    from urllib.parse import urlparse, urlencode, parse_qs
     import secrets as _secrets
     import hashlib, base64
 
@@ -61,150 +46,157 @@ async def _playwright_revive_account(
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
-            headless=True,
-            proxy=proxy_config,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-            ],
+            headless=True, proxy=proxy_config,
+            args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-dev-shm-usage"],
         )
         try:
             context = await browser.new_context(
                 user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
-                viewport={"width": 1920, "height": 1080},
-                locale="en-US",
+                viewport={"width": 1920, "height": 1080}, locale="en-US",
             )
-
-            await context.add_init_script("""
-                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-                window.chrome = {runtime: {}};
-            """)
-
+            await context.add_init_script(
+                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined}); window.chrome = {runtime: {}};"
+            )
             page = await context.new_page()
 
-            # Step 1: GET auth.openai.com/log-in → 过 CF
-            logger.info(f"[PW-Revive] {email} Step 1: GET auth.openai.com/log-in ...")
-            resp = await page.goto("https://auth.openai.com/log-in", wait_until="domcontentloaded", timeout=30000)
-            content = await page.content()
-            if "Just a moment" in content:
-                logger.info(f"[PW-Revive] {email} CF challenge, 等待 15s...")
-                await page.wait_for_timeout(15000)
-                content = await page.content()
-                if "Just a moment" in content:
-                    return {"ok": False, "email": email, "message": "CF challenge 未通过"}
+            # Step 1: GET chatgpt.com/api/auth/csrf → CSRF token（带重试）
+            csrf_token = ""
+            for _step1_attempt in range(3):
+                try:
+                    if _step1_attempt > 0:
+                        await browser.close()
+                        _new_sid = _secrets.token_hex(8)
+                        _new_proxy = f"http://Pokemon.cli-session-pw{_new_sid}:9624f371e464ba2b8a73c4f42e841135f0a969d21aaec6d1@127.0.0.1:2260"
+                        _np = urlparse(_new_proxy)
+                        proxy_config = {"server": f"{_np.scheme}://{_np.hostname}:{_np.port}", "username": _np.username or "", "password": _np.password or ""}
+                        logger.info(f"[PW-Revive] {email} Step 1 重试 {_step1_attempt+1}/3 (换代理)...")
+                        browser = await p.chromium.launch(headless=True, proxy=proxy_config, args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-dev-shm-usage"])
+                        context = await browser.new_context(user_agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36", viewport={"width": 1920, "height": 1080}, locale="en-US")
+                        await context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined}); window.chrome = {runtime: {}};")
+                        page = await context.new_page()
+                    
+                    logger.info(f"[PW-Revive] {email} Step 1: GET chatgpt.com/api/auth/csrf ...")
+                    resp = await page.goto("https://chatgpt.com/api/auth/csrf", wait_until="domcontentloaded", timeout=30000)
+                    content = await page.content()
+                    if "Just a moment" in content:
+                        logger.info(f"[PW-Revive] {email} CF challenge, 等待 15s...")
+                        await page.wait_for_timeout(15000)
+                        content = await page.content()
+                        if "Just a moment" in content:
+                            if _step1_attempt < 2:
+                                logger.warning(f"[PW-Revive] {email} CF challenge 未通过, 换代理重试...")
+                                continue
+                            return {"ok": False, "email": email, "message": "chatgpt.com CF challenge 未通过"}
+                    
+                    # 解析 CSRF token
+                    try:
+                        csrf_data = json.loads(content.split("<pre>")[1].split("</pre>")[0])
+                        csrf_token = csrf_data.get("csrfToken", "")
+                    except:
+                        pass
+                    if csrf_token:
+                        break
+                except Exception as step1_exc:
+                    logger.warning(f"[PW-Revive] {email} Step 1 失败 ({_step1_attempt+1}/3): {type(step1_exc).__name__}")
+                    if _step1_attempt >= 2:
+                        return {"ok": False, "email": email, "message": f"Step 1 连接失败: {type(step1_exc).__name__}"}
 
-            cookies = await context.cookies()
-            cookie_names = [c["name"] for c in cookies]
-            logger.info(f"[PW-Revive] {email} Step 1 OK: cookies={cookie_names}")
+            if not csrf_token:
+                return {"ok": False, "email": email, "message": "未获取到 CSRF token"}
 
-            if "cf_clearance" not in cookie_names and "__cf_bm" not in cookie_names:
-                logger.warning(f"[PW-Revive] {email} 缺少 CF cookies")
-                # 继续尝试
 
-            # Step 2: 构造 authorize URL（PKCE）
-            code_verifier = "".join(_secrets.choice("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_") for _ in range(64))
-            code_challenge = base64.urlsafe_b64encode(hashlib.sha256(code_verifier.encode()).digest()).decode().rstrip("=")
+            logger.info(f"[PW-Revive] {email} ✅ CSRF token: {csrf_token[:30]}...")
 
-            from config.openai_protocol import (
-                OPENAI_AUDIENCE,
-                OPENAI_CLIENT_ID,
-                OPENAI_REDIRECT_URI,
-                OPENAI_SCOPE,
+            # Step 2: POST chatgpt.com/api/auth/signin/openai → authorize URL
+            # 和注册流程一样：参数在 URL query 中，body 只有 callbackUrl/csrfToken/json
+            signin_url = (
+                "https://chatgpt.com/api/auth/signin/openai?"
+                + urlencode({
+                    "prompt": "login",
+                    "ext-oai-did": device_id,
+                    "ext-passkey-client-capabilities": "11111",
+                    "screen_hint": "login_or_signup",
+                    "login_hint": email,
+                })
             )
+            logger.info(f"[PW-Revive] {email} Step 2: POST signin/openai ...")
+            signin_resp = await context.request.post(
+                signin_url,
+                data={"callbackUrl": "https://chatgpt.com/", "csrfToken": csrf_token, "json": "true"},
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Origin": "https://chatgpt.com",
+                    "Referer": "https://chatgpt.com/",
+                },
+                timeout=15000,
+            )
+            signin_status = signin_resp.status
+            signin_body = await signin_resp.text()
+            logger.info(f"[PW-Revive] {email} signin: status={signin_status}, body={signin_body[:300]}")
 
-            def _rand(length: int) -> str:
-                return "".join(_secrets.choice("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_") for _ in range(length))
+            authorize_url = None
+            if signin_status == 200:
+                try:
+                    signin_data = json.loads(signin_body)
+                    authorize_url = signin_data.get("url", "")
+                except:
+                    pass
 
-            params = {
-                "issuer": "https://auth.openai.com",
-                "client_id": OPENAI_CLIENT_ID,
-                "scope": OPENAI_SCOPE,
-                "response_type": "code",
-                "redirect_uri": OPENAI_REDIRECT_URI,
-                "audience": OPENAI_AUDIENCE,
-                "device_id": device_id,
-                "prompt": "login",
-                "ext-oai-did": device_id,
-                "screen_hint": "login_or_signup",
-                "login_hint": email,
-                "ccaps": "login_methods",
-                "max_age": "0",
-                "response_mode": "query",
-                "state": _rand(32),
-                "nonce": _rand(32),
-                "code_challenge": code_challenge,
-                "code_challenge_method": "S256",
-            }
-            authorize_url = "https://auth.openai.com/api/accounts/authorize?" + urlencode(params)
+            if not authorize_url:
+                return {"ok": False, "email": email, "message": f"signin 未返回 authorize URL: {signin_status}"}
+            logger.info(f"[PW-Revive] {email} authorize URL: {authorize_url[:100]}...")
+            logger.info(f"[PW-Revive] {email} authorize URL: {authorize_url[:100]}...")
 
-            # Step 3: GET authorize URL → 应该重定向到 email-verification → 触发 OTP
-            logger.info(f"[PW-Revive] {email} Step 2: GET authorize URL ...")
+            # Step 3: GET authorize URL → email-verification → OTP 发送
+            logger.info(f"[PW-Revive] {email} Step 3: GET authorize URL ...")
             try:
                 resp = await page.goto(authorize_url, wait_until="domcontentloaded", timeout=30000)
-            except Exception as e:
-                # 可能是重定向到 chatgpt.com 导致超时，检查当前 URL
-                logger.info(f"[PW-Revive] {email} authorize 超时/重定向: {type(e).__name__}, 检查 URL...")
+            except:
+                pass  # 可能重定向
 
-            final_url = page.url
-            logger.info(f"[PW-Revive] {email} 落点 URL: {final_url}")
-
-            # 等待 CF challenge 通过（如果有的话）
             content = await page.content()
             if "Just a moment" in content:
                 logger.info(f"[PW-Revive] {email} authorize CF challenge, 等待 15s...")
                 await page.wait_for_timeout(15000)
 
-            # 如果落在 email-verification 页面，说明 OTP 已发送
+            final_url = page.url
+            logger.info(f"[PW-Revive] {email} 落点: {final_url}")
+
             if "email-verification" in page.url or "email" in page.url.lower():
-                logger.info(f"[PW-Revive] {email} ✅ 落在 email-verification，OTP 应已发送")
+                logger.info(f"[PW-Revive] {email} ✅ 落在 email-verification，OTP 已发送")
             else:
-                logger.warning(f"[PW-Revive] {email} 未落在 email-verification，当前: {page.url}")
-                # 尝试直接导航到 email-verification
+                logger.warning(f"[PW-Revive] {email} 未落在 email-verification: {page.url}")
                 await page.goto("https://auth.openai.com/email-verification", wait_until="domcontentloaded", timeout=15000)
                 content = await page.content()
                 if "Just a moment" in content:
-                    await page.wait_for_timeout(10000)
+                    await page.wait_for_timeout(15000)
 
             # Step 4: 获取 OTP
-            logger.info(f"[PW-Revive] {email} Step 3: 等待 OTP...")
+            logger.info(f"[PW-Revive] {email} Step 4: 等待 OTP...")
             if otp_callback:
                 otp_code = await otp_callback(email)
             else:
-                # 默认用 manymail 收 OTP
                 otp_code = await _wait_otp_manymail(email, manymail_creds, timeout=90)
 
             if not otp_code:
                 return {"ok": False, "email": email, "message": "OTP 未收到"}
-
             logger.info(f"[PW-Revive] {email} 收到 OTP: {otp_code}")
 
-            # Step 5: POST validate（JS fetch）
-            logger.info(f"[PW-Revive] {email} Step 4: POST validate...")
-
-            # 确保在 email-verification 页面上
+            # Step 5: POST validate（APIRequestContext）
+            logger.info(f"[PW-Revive] {email} Step 5: POST validate...")
             current_url = page.url
-            logger.info(f"[PW-Revive] {email} 当前页面: {current_url}")
-
-            # 导航到 email-verification 页面（确保 CF cookies 对此路径有效）
             if "email-verification" not in current_url:
                 try:
-                    resp = await page.goto("https://auth.openai.com/email-verification", wait_until="domcontentloaded", timeout=15000)
-                    content = await page.content()
-                    if "Just a moment" in content:
-                        logger.info(f"[PW-Revive] {email} email-verification CF challenge, 等待 15s...")
+                    await page.goto("https://auth.openai.com/email-verification", wait_until="domcontentloaded", timeout=15000)
+                    c = await page.content()
+                    if "Just a moment" in c:
                         await page.wait_for_timeout(15000)
-                    logger.info(f"[PW-Revive] {email} 导航到 email-verification, URL: {page.url}")
-                except Exception as nav_exc:
-                    logger.warning(f"[PW-Revive] {email} 导航 email-verification 失败: {nav_exc}")
+                except:
+                    pass
 
-            # 检查 cookies
-            cookies_before = await context.cookies()
-            cookie_names = [c["name"] for c in cookies_before]
-            logger.info(f"[PW-Revive] {email} POST 前 cookies: {cookie_names}")
+            cookies = await context.cookies()
+            logger.info(f"[PW-Revive] {email} POST 前 cookies: {[c['name'] for c in cookies]}")
 
-            # 主方案: APIRequestContext POST（携带浏览器 cookies + 过 CF）
-            logger.info(f"[PW-Revive] {email} APIRequestContext POST validate...")
             api_resp = await context.request.post(
                 "https://auth.openai.com/api/accounts/email-otp/validate",
                 data=json.dumps({"code": otp_code}),
@@ -213,112 +205,45 @@ async def _playwright_revive_account(
                     "Referer": "https://auth.openai.com/email-verification",
                     "Origin": "https://auth.openai.com",
                 },
+                timeout=15000,
             )
             api_status = api_resp.status
             api_body = await api_resp.text()
-            logger.info(f"[PW-Revive] {email} APIRequest POST: status={api_status}, body={api_body[:300]}")
+            logger.info(f"[PW-Revive] {email} POST validate: status={api_status}, body={api_body[:300]}")
 
-            # 判断是否过 CF：CF 403 返回 HTML（Just a moment），API 403 返回 JSON
-            is_cf_403 = api_status == 403 and "Just a moment" in api_body
-            result = {"status": api_status, "body": api_body}
+            if api_status != 200:
+                return {"ok": False, "email": email, "message": f"validate 失败: HTTP {api_status}"}
 
-            if is_cf_403:
-                # CF 403 才回退到 JS fetch
-                logger.warning(f"[PW-Revive] {email} APIRequest CF 403, 尝试 JS fetch...")
-                result = await page.evaluate("""
-                    async (otpCode) => {
-                        try {
-                            const resp = await fetch('/api/accounts/email-otp/validate', {
-                                method: 'POST',
-                                headers: {
-                                    'Content-Type': 'application/json',
-                                },
-                                body: JSON.stringify({code: otpCode}),
-                                credentials: 'include',
-                                mode: 'same-origin',
-                            });
-                            const text = await resp.text();
-                            return {status: resp.status, body: text};
-                        } catch(e) {
-                            return {error: e.toString()};
-                        }
-                    }
-                """, otp_code)
-
-            logger.info(f"[PW-Revive] {email} POST validate result: {json.dumps(result, ensure_ascii=False)[:300]}")
-
-            if result.get("status") != 200:
-                return {"ok": False, "email": email, "message": f"validate 失败: HTTP {result.get('status')}"}
-
-            body = result.get("body", "")
             try:
-                data = json.loads(body)
+                data = json.loads(api_body)
             except:
-                return {"ok": False, "email": email, "message": f"validate 响应解析失败: {body[:200]}"}
+                return {"ok": False, "email": email, "message": f"validate 响应解析失败"}
 
             if "error" in data:
                 return {"ok": False, "email": email, "message": f"validate 错误: {data['error']}"}
 
             continue_url = data.get("continue_url")
             if not continue_url:
-                return {"ok": False, "email": email, "message": f"validate 缺少 continue_url: {data}"}
+                return {"ok": False, "email": email, "message": "validate 缺少 continue_url"}
 
-            logger.info(f"[PW-Revive] {email} ✅ validate 成功, continue_url={continue_url[:80]}")
+            logger.info(f"[PW-Revive] {email} ✅ validate 成功, continue_url={continue_url[:80]}...")
 
-            # Step 6: 用 OAuth token 端点换取 access_token
-            # continue_url 中包含 code 参数，用 PKCE code_verifier 换 token
-            logger.info(f"[PW-Revive] {email} Step 5: 用 OAuth code 换 token...")
-
-            from urllib.parse import urlparse, parse_qs
-            parsed = urlparse(continue_url)
-            qs = parse_qs(parsed.query)
-            auth_code = qs.get("code", [""])[0]
-
-            if not auth_code:
-                return {"ok": False, "email": email, "message": f"continue_url 中无 code: {continue_url[:200]}"}
-
-            logger.info(f"[PW-Revive] {email} OAuth code: {auth_code[:40]}...")
-
-            # 方案 A: POST auth.openai.com/oauth/token
-            token_resp = await context.request.post(
-                "https://auth.openai.com/oauth/token",
-                data={
-                    "grant_type": "authorization_code",
-                    "code": auth_code,
-                    "code_verifier": code_verifier,
-                    "redirect_uri": OPENAI_REDIRECT_URI,
-                    "client_id": OPENAI_CLIENT_ID,
-                },
-                headers={
-                    "Content-Type": "application/x-www-form-urlencoded",
-                    "Origin": "https://chatgpt.com",
-                },
-                timeout=15000,
-            )
-            token_status = token_resp.status
-            token_body = await token_resp.text()
-            logger.info(f"[PW-Revive] {email} oauth/token: status={token_status}, body={token_body[:300]}")
-
-            if token_status == 200:
-                token_data = json.loads(token_body)
-                access_token = token_data.get("access_token", "")
-                if access_token:
-                    logger.info(f"[PW-Revive] {email} ✅✅✅ 获取 access_token: {access_token[:40]}...")
-                    return {
-                        "ok": True,
-                        "email": email,
-                        "message": "Playwright OAuth token 复活成功",
-                        "access_token": access_token,
-                    }
-
-            # 方案 B: 用 page.goto 跟随 continue_url（让 Chrome 过 chatgpt.com CF）
-            logger.info(f"[PW-Revive] {email} oauth/token 失败, 尝试 page.goto continue_url...")
+            # Step 6: page.goto continue_url → chatgpt.com 回调 → session cookie
+            logger.info(f"[PW-Revive] {email} Step 6: page.goto continue_url ...")
             try:
                 await page.goto(continue_url, wait_until="domcontentloaded", timeout=20000)
-            except:
-                pass
+                c = await page.content()
+                if "Just a moment" in c:
+                    logger.info(f"[PW-Revive] {email} chatgpt.com CF challenge, 等待 15s...")
+                    await page.wait_for_timeout(15000)
+                logger.info(f"[PW-Revive] {email} continue_url 跳转后: {page.url}")
+            except Exception as goto_exc:
+                logger.warning(f"[PW-Revive] {email} page.goto continue_url: {goto_exc}")
 
-            # 用 page.evaluate 在 chatgpt.com 上获取 session
+            await page.wait_for_timeout(2000)
+
+            # Step 7: GET chatgpt.com/api/auth/session → accessToken
+            logger.info(f"[PW-Revive] {email} Step 7: GET session ...")
             session_result = await page.evaluate("""
                 async () => {
                     try {
@@ -330,40 +255,40 @@ async def _playwright_revive_account(
                     }
                 }
             """)
-            logger.info(f"[PW-Revive] {email} session (JS fetch): {json.dumps(session_result, ensure_ascii=False)[:200]}")
+            logger.info(f"[PW-Revive] {email} session: {json.dumps(session_result, ensure_ascii=False)[:300]}")
 
             if session_result.get("status") == 200:
-                session_data = json.loads(session_result.get("body", "{}"))
-                access_token = session_data.get("accessToken")
-                if access_token:
-                    logger.info(f"[PW-Revive] {email} ✅✅ 获取新 accessToken: {access_token[:40]}...")
-                    return {
-                        "ok": True,
-                        "email": email,
-                        "message": "token 复活成功",
-                        "access_token": access_token,
-                    }
-                else:
-                    return {"ok": False, "email": email, "message": f"session 无 accessToken: {json.dumps(session_data)[:200]}"}
+                try:
+                    session_data = json.loads(session_result.get("body", "{}"))
+                    access_token = (
+                        session_data.get("accessToken")
+                        or session_data.get("access_token")
+                        or ""
+                    )
+                    if access_token:
+                        logger.info(f"[PW-Revive] {email} ✅✅✅ 获取 accessToken: {access_token[:40]}...")
+                        return {
+                            "ok": True, "email": email,
+                            "message": "Playwright NextAuth 复活成功",
+                            "access_token": access_token,
+                        }
+                    else:
+                        keys = list(session_data.keys())
+                        return {"ok": False, "email": email, "message": f"session 无 accessToken, keys={keys}"}
+                except:
+                    return {"ok": False, "email": email, "message": "session JSON 解析失败"}
             else:
-                return {"ok": False, "email": email, "message": f"session 获取失败: HTTP {session_result.get('status')}"}
+                return {"ok": False, "email": email, "message": f"session HTTP {session_result.get('status')}"}
 
         finally:
             await browser.close()
 
 
 async def _wait_otp_manymail(email: str, creds: dict | None, timeout: int = 90) -> str | None:
-    """通过 manymail 收 OTP。
-
-    需要先恢复 manymail 进程内上下文（get_account_context），
-    然后调用 wait_for_otp 轮询收件箱。
-    """
     if not creds:
         logger.error(f"[PW-Revive] {email} 无 manymail 凭据")
         return None
-
     try:
-        # 1. 恢复 manymail 上下文
         from core.manymail_client import restore_context, get_account_context
         ctx = get_account_context(email)
         if ctx is None:
@@ -375,15 +300,8 @@ async def _wait_otp_manymail(email: str, creds: dict | None, timeout: int = 90) 
             else:
                 logger.error(f"[PW-Revive] {email} manymail 密码缺失")
                 return None
-
-        # 2. 调用 wait_for_otp
         from core.email_provider import wait_for_otp
-        otp = await asyncio.to_thread(
-            wait_for_otp,
-            email=email,
-            after_ts=time.time() - 5,  # 只接受 5s 内的新 OTP
-            max_wait=timeout,
-        )
+        otp = await asyncio.to_thread(wait_for_otp, email=email, after_ts=time.time() - 5, max_wait=timeout)
         return otp
     except Exception as e:
         logger.error(f"[PW-Revive] {email} OTP 获取失败: {type(e).__name__}: {e}")
@@ -391,19 +309,11 @@ async def _wait_otp_manymail(email: str, creds: dict | None, timeout: int = 90) 
 
 
 def playwright_revive_account(
-    email: str,
-    proxy: str,
-    device_id: str,
+    email: str, proxy: str, device_id: str,
     manymail_creds: dict | None = None,
-    otp_callback=None,
-    timeout: int = 120,
+    otp_callback=None, timeout: int = 120,
 ) -> dict[str, Any]:
-    """同步包装：用 Playwright 复活单个账号 token。"""
     return asyncio.run(_playwright_revive_account(
-        email=email,
-        proxy=proxy,
-        device_id=device_id,
-        manymail_creds=manymail_creds,
-        otp_callback=otp_callback,
-        timeout=timeout,
+        email=email, proxy=proxy, device_id=device_id,
+        manymail_creds=manymail_creds, otp_callback=otp_callback, timeout=timeout,
     ))
