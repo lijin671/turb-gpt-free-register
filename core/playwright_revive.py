@@ -108,9 +108,9 @@ async def _playwright_revive_account(
             logger.info(f"[PW-Revive] {email} ✅ CSRF token: {csrf_token[:30]}...")
 
             # Step 2: POST chatgpt.com/api/auth/signin/openai → authorize URL
-            # 和注册流程一样：参数在 URL query 中，body 只有 callbackUrl/csrfToken/json
+            # 用 page.evaluate 发 POST（Chrome 自动携带 cookies）
             signin_url = (
-                "https://chatgpt.com/api/auth/signin/openai?"
+                "/api/auth/signin/openai?"
                 + urlencode({
                     "prompt": "login",
                     "ext-oai-did": device_id,
@@ -119,32 +119,40 @@ async def _playwright_revive_account(
                     "login_hint": email,
                 })
             )
-            logger.info(f"[PW-Revive] {email} Step 2: POST signin/openai ...")
-            signin_resp = await context.request.post(
-                signin_url,
-                data={"callbackUrl": "https://chatgpt.com/", "csrfToken": csrf_token, "json": "true"},
-                headers={
-                    "Content-Type": "application/x-www-form-urlencoded",
-                    "Origin": "https://chatgpt.com",
-                    "Referer": "https://chatgpt.com/",
-                },
-                timeout=15000,
-            )
-            signin_status = signin_resp.status
-            signin_body = await signin_resp.text()
-            logger.info(f"[PW-Revive] {email} signin: status={signin_status}, body={signin_body[:300]}")
+            logger.info(f"[PW-Revive] {email} Step 2: POST signin/openai (page.evaluate)...")
+            signin_result = await page.evaluate("""
+                async ({url, csrf, callbackUrl}) => {
+                    try {
+                        const body = new URLSearchParams();
+                        body.set('callbackUrl', callbackUrl);
+                        body.set('csrfToken', csrf);
+                        body.set('json', 'true');
+                        const resp = await fetch(url, {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                            body: body,
+                            credentials: 'include',
+                        });
+                        const text = await resp.text();
+                        return {status: resp.status, body: text};
+                    } catch(e) {
+                        return {error: e.toString()};
+                    }
+                }
+            """, {"url": signin_url, "csrf": csrf_token, "callbackUrl": "https://chatgpt.com/"})
+            logger.info(f"[PW-Revive] {email} signin: {json.dumps(signin_result, ensure_ascii=False)[:300]}")
 
             authorize_url = None
-            if signin_status == 200:
+            if signin_result.get("status") == 200:
                 try:
-                    signin_data = json.loads(signin_body)
+                    signin_data = json.loads(signin_result.get("body", ""))
                     authorize_url = signin_data.get("url", "")
                 except:
                     pass
 
             if not authorize_url:
-                return {"ok": False, "email": email, "message": f"signin 未返回 authorize URL: {signin_status}"}
-            logger.info(f"[PW-Revive] {email} authorize URL: {authorize_url[:100]}...")
+                return {"ok": False, "email": email, "message": f"signin 未返回 authorize URL: HTTP {signin_result.get('status')}"}
+            logger.info(f"[PW-Revive] {email} ✅ authorize URL: {authorize_url[:100]}...")
             logger.info(f"[PW-Revive] {email} authorize URL: {authorize_url[:100]}...")
 
             # Step 3: GET authorize URL → email-verification → OTP 发送
