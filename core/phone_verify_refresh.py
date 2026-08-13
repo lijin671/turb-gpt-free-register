@@ -75,22 +75,82 @@ class PhoneVerifyRefreshError(RuntimeError):
 
 
 # ============================================================
-# 上下文：强制 GrizzlySMS（运行期间临时覆盖，退出恢复）
+# 上下文：切换接码平台（运行期间临时覆盖，退出恢复）
 # ============================================================
 
-class _ForceGrizzlyProvider:
+class _ForceSmsProvider:
     """sms_provider 每次调用都动态读 config.codex.SMS_PROVIDER，
-    这里临时把它压成 grizzly，保证本模块只走 GrizzlySMS。"""
+    这里临时把它压成指定 provider，退出时恢复原值。
+
+    hero 分支额外覆盖 config.plus 的 HERO_SMS_SERVICE/COUNTRY/MAX_PRICE：
+    plus.py 的默认值是 GCash 绑卡用的（service=bc, country=4），
+    解码保号要的是 OpenAI 服务码（dr）+ 有实体号的国家。
+    """
+
+    def __init__(self, provider: str, hero_country: int | None = None):
+        self.provider = (provider or "grizzly").strip().lower()
+        self.hero_country = hero_country
+        self._old_provider = None
+        self._old_hero: dict = {}
 
     def __enter__(self):
-        self._old = getattr(_codex_cfg, "SMS_PROVIDER", "grizzly")
-        _codex_cfg.SMS_PROVIDER = "grizzly"
-        logger.info(f"[接码] SMS_PROVIDER 临时切换: {self._old} -> grizzly")
+        self._old_provider = getattr(_codex_cfg, "SMS_PROVIDER", "grizzly")
+        _codex_cfg.SMS_PROVIDER = self.provider
+        logger.info(f"[接码] SMS_PROVIDER 临时切换: {self._old_provider} -> {self.provider}")
+
+        if self.provider == "hero":
+            from config import plus as _plus
+            service = str(getattr(_codex_cfg, "REFRESH_DECODE_HERO_SERVICE", "dr") or "dr")
+            country = self.hero_country
+            if country is None:
+                country = int(str(getattr(_codex_cfg, "REFRESH_DECODE_HERO_COUNTRY", 187) or 187))
+            max_price = float(getattr(_codex_cfg, "REFRESH_DECODE_HERO_MAX_PRICE", 0) or 0)
+            for key, val in (
+                ("HERO_SMS_SERVICE", service),
+                ("HERO_SMS_COUNTRY", country),
+                ("HERO_SMS_MAX_PRICE", max_price),
+            ):
+                self._old_hero[key] = getattr(_plus, key, None)
+                setattr(_plus, key, val)
+            logger.info(
+                f"[接码] HeroSMS 参数覆盖: service={service}, country={country}, "
+                f"max_price={max_price or '不限'}"
+            )
         return self
 
     def __exit__(self, exc_type, exc, tb):
-        _codex_cfg.SMS_PROVIDER = self._old
+        _codex_cfg.SMS_PROVIDER = self._old_provider
+        if self._old_hero:
+            from config import plus as _plus
+            for key, val in self._old_hero.items():
+                setattr(_plus, key, val)
         return False
+
+
+def _decode_sms_plan() -> list[tuple[str, int | None]]:
+    """解码保号的接码平台尝试顺序：[(provider, hero_country|None), ...]。
+
+    REFRESH_DECODE_SMS_PROVIDERS 支持 "grizzly,hero:187,hero:4" 形式，
+    冒号后是该次尝试的 hero 国家码（grizzly 忽略）。
+    """
+    raw = str(getattr(_codex_cfg, "REFRESH_DECODE_SMS_PROVIDERS", "") or "").strip()
+    if not raw:
+        raw = "grizzly,hero"
+    plan: list[tuple[str, int | None]] = []
+    for item in raw.split(","):
+        item = item.strip().lower()
+        if not item:
+            continue
+        name, _, country = item.partition(":")
+        name = name.strip()
+        if not name:
+            continue
+        try:
+            country_code = int(country.strip()) if country.strip() else None
+        except ValueError:
+            country_code = None
+        plan.append((name, country_code))
+    return plan or [("grizzly", None)]
 
 
 # ============================================================
@@ -140,10 +200,12 @@ def check_account_alive(access_token: str, proxy: str | None = None) -> dict:
 # 步骤 3：GrizzlySMS 全自动接码（本模块核心，重写版）
 # ============================================================
 
-def grizzly_verify_phone(session: BrowserSession, max_retries: int | None = None) -> dict:
+def sms_verify_phone(session: BrowserSession, max_retries: int | None = None) -> dict:
     """
     在已建立 auth.openai.com 会话（且已过邮箱 OTP）的 BrowserSession 上，
-    用 GrizzlySMS 完成 /add-phone 手机验证。
+    用当前 SMS_PROVIDER 完成 /add-phone 手机验证。
+
+    调用方需先用 _ForceSmsProvider 上下文压定 provider。
 
     单个号码的完整生命周期：
         acquire_number 取号
@@ -157,11 +219,13 @@ def grizzly_verify_phone(session: BrowserSession, max_retries: int | None = None
     Returns:
         {
             "phone": "16195551234",         # 不带 + 的号码
-            "activation_id": "123456789",   # GrizzlySMS 激活 ID
+            "activation_id": "123456789",   # 接码平台激活 ID
             "sms_code": "123456",           # 收到的短信验证码
             "attempts": 2,                  # 第几次尝试成功
+            "provider": "grizzly",          # 实际用的接码平台
         }
     """
+    provider_name = str(getattr(_codex_cfg, "SMS_PROVIDER", "grizzly") or "grizzly")
     max_retries = max_retries or int(getattr(_codex_cfg, "SMS_MAX_RETRIES", 3) or 3)
     http = sms_provider._http()
     last_err: Exception | None = None
@@ -230,10 +294,11 @@ def grizzly_verify_phone(session: BrowserSession, max_retries: int | None = None
                     "activation_id": activation_id,
                     "sms_code": sms_code,
                     "attempts": attempt,
+                    "provider": provider_name,
                 }
 
             except sms_provider.SmsNoBalanceError:
-                # 余额不足重试无意义，直接终止
+                # 余额不足重试无意义，直接终止（由调用方换平台）
                 raise
             except sms_provider.SmsProviderError as exc:
                 last_err = exc
@@ -244,11 +309,41 @@ def grizzly_verify_phone(session: BrowserSession, max_retries: int | None = None
                 continue
 
         raise PhoneVerifyRefreshError(
-            f"GrizzlySMS 接码重试 {max_retries} 次仍失败"
+            f"{provider_name} 接码重试 {max_retries} 次仍失败"
             + (f"，最后错误：{last_err}" if last_err else "")
         )
     finally:
         http.close()
+
+
+def verify_phone_with_fallback(
+    session: BrowserSession,
+    max_retries: int | None = None,
+    plan: list[tuple[str, int | None]] | None = None,
+) -> dict:
+    """按 _decode_sms_plan() 顺序尝试各接码平台，NO_BALANCE / 无号自动换下一家。
+
+    只有全部平台都失败才抛错。返回值同 sms_verify_phone。
+    """
+    plan = plan or _decode_sms_plan()
+    errors: list[str] = []
+    for provider, hero_country in plan:
+        with _ForceSmsProvider(provider, hero_country=hero_country):
+            try:
+                return sms_verify_phone(session, max_retries=max_retries)
+            except sms_provider.SmsNoBalanceError as exc:
+                msg = f"{provider}: 余额不足（{exc}）"
+                logger.warning(f"[接码] {msg}，尝试下一个平台")
+                errors.append(msg)
+                continue
+            except PhoneVerifyRefreshError as exc:
+                msg = f"{provider}: {exc}"
+                logger.warning(f"[接码] {msg}，尝试下一个平台")
+                errors.append(msg)
+                continue
+    raise PhoneVerifyRefreshError(
+        "所有接码平台均失败：" + "；".join(errors) if errors else "接码计划为空"
+    )
 
 
 def _sleep_before_retry(attempt: int, max_retries: int) -> None:
@@ -351,9 +446,8 @@ def run_phone_verify_refresh(
         _submit_email_otp(session, email_otp)
         human_delay("api")
 
-        # ---- 5. GrizzlySMS 手机验证 ----
-        with _ForceGrizzlyProvider():
-            phone_info = grizzly_verify_phone(session, max_retries=max_sms_retries)
+        # ---- 5. 接码完成手机验证（按 REFRESH_DECODE_SMS_PROVIDERS 顺序，余额不足自动换家） ----
+        phone_info = verify_phone_with_fallback(session, max_retries=max_sms_retries)
         result["phone"] = phone_info
         human_delay("post_auth")
 

@@ -30,6 +30,8 @@ from core.hero_sms import (
     HeroSMSError,
     CodeTimeoutError as HeroCodeTimeoutError,
     InvalidApiKeyError as HeroInvalidApiKeyError,
+    InsufficientFundsError as HeroInsufficientFundsError,
+    NoNumbersAvailableError as HeroNoNumbersError,
 )
 
 # 注意：用 `from config import codex` 而不是 `from config.codex import X`，
@@ -426,7 +428,16 @@ def acquire_number(
             hero_country = int(str(country or _plus.HERO_SMS_COUNTRY or 6).strip() or 6)
             max_price = float(_plus.HERO_SMS_MAX_PRICE or 0) or None
             client = _hero_client()
-            act = client.get_number(service=hero_service, country=hero_country, max_price=max_price)
+            # HeroSMS 的余额/无号异常统一映射到本模块异常，
+            # 否则上层按 SmsNoBalanceError/SmsNoNumbersError 做的换平台/换号逻辑接不住。
+            try:
+                act = client.get_number(service=hero_service, country=hero_country, max_price=max_price)
+            except HeroInsufficientFundsError as exc:
+                raise SmsNoBalanceError(f"HeroSMS 余额不足（NO_BALANCE）：{exc}") from exc
+            except HeroNoNumbersError as exc:
+                raise SmsNoNumbersError(
+                    f"HeroSMS 无可用号码 service={hero_service} country={hero_country}：{exc}"
+                ) from exc
             activation_id = str(act.id)
             phone = str(act.phone or "").lstrip("+")
             _HERO_PROXY_BY_ACTIVATION[activation_id] = client.proxy

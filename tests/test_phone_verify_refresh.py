@@ -38,16 +38,80 @@ class ResolveAccountTest(unittest.TestCase):
             pvr.resolve_account_from_token(_make_jwt("a@example.com", exp_offset=-10))
 
 
-class ForceGrizzlyContextTest(unittest.TestCase):
+class ForceSmsProviderContextTest(unittest.TestCase):
     def test_restores_provider(self):
         old = codex_cfg.SMS_PROVIDER
         codex_cfg.SMS_PROVIDER = "hero"
         try:
-            with pvr._ForceGrizzlyProvider():
+            with pvr._ForceSmsProvider("grizzly"):
                 self.assertEqual(codex_cfg.SMS_PROVIDER, "grizzly")
             self.assertEqual(codex_cfg.SMS_PROVIDER, "hero")
         finally:
             codex_cfg.SMS_PROVIDER = old
+
+    def test_hero_overrides_and_restores_plus_config(self):
+        from config import plus as plus_cfg
+        old_provider = codex_cfg.SMS_PROVIDER
+        before = (plus_cfg.HERO_SMS_SERVICE, plus_cfg.HERO_SMS_COUNTRY, plus_cfg.HERO_SMS_MAX_PRICE)
+        try:
+            with pvr._ForceSmsProvider("hero", hero_country=4):
+                self.assertEqual(codex_cfg.SMS_PROVIDER, "hero")
+                self.assertEqual(plus_cfg.HERO_SMS_SERVICE, codex_cfg.REFRESH_DECODE_HERO_SERVICE)
+                self.assertEqual(plus_cfg.HERO_SMS_COUNTRY, 4)
+            self.assertEqual(
+                (plus_cfg.HERO_SMS_SERVICE, plus_cfg.HERO_SMS_COUNTRY, plus_cfg.HERO_SMS_MAX_PRICE),
+                before,
+            )
+        finally:
+            codex_cfg.SMS_PROVIDER = old_provider
+
+
+class DecodeSmsPlanTest(unittest.TestCase):
+    def test_parses_provider_and_country(self):
+        old = codex_cfg.REFRESH_DECODE_SMS_PROVIDERS
+        codex_cfg.REFRESH_DECODE_SMS_PROVIDERS = "grizzly,hero:187,hero:4"
+        try:
+            self.assertEqual(
+                pvr._decode_sms_plan(),
+                [("grizzly", None), ("hero", 187), ("hero", 4)],
+            )
+        finally:
+            codex_cfg.REFRESH_DECODE_SMS_PROVIDERS = old
+
+    def test_empty_falls_back_to_grizzly_then_hero(self):
+        old = codex_cfg.REFRESH_DECODE_SMS_PROVIDERS
+        codex_cfg.REFRESH_DECODE_SMS_PROVIDERS = ""
+        try:
+            self.assertEqual(pvr._decode_sms_plan(), [("grizzly", None), ("hero", None)])
+        finally:
+            codex_cfg.REFRESH_DECODE_SMS_PROVIDERS = old
+
+
+class VerifyPhoneFallbackTest(unittest.TestCase):
+    def test_no_balance_falls_through_to_next_provider(self):
+        calls = []
+
+        def fake_verify(session, max_retries=None):
+            provider = codex_cfg.SMS_PROVIDER
+            calls.append(provider)
+            if provider == "grizzly":
+                raise pvr.sms_provider.SmsNoBalanceError("NO_BALANCE")
+            return {"phone": "16195551234", "provider": provider, "attempts": 1}
+
+        with patch.object(pvr, "sms_verify_phone", side_effect=fake_verify):
+            out = pvr.verify_phone_with_fallback(
+                MagicMock(), plan=[("grizzly", None), ("hero", 187)]
+            )
+        self.assertEqual(calls, ["grizzly", "hero"])
+        self.assertEqual(out["provider"], "hero")
+
+    def test_all_providers_fail_raises(self):
+        with patch.object(pvr, "sms_verify_phone",
+                          side_effect=pvr.sms_provider.SmsNoBalanceError("NO_BALANCE")):
+            with self.assertRaises(pvr.PhoneVerifyRefreshError):
+                pvr.verify_phone_with_fallback(
+                    MagicMock(), plan=[("grizzly", None), ("hero", 187)]
+                )
 
 
 class RunPhoneVerifyRefreshTest(unittest.TestCase):
@@ -62,8 +126,9 @@ class RunPhoneVerifyRefreshTest(unittest.TestCase):
             patch.object(pvr, "_bootstrap_authorize"),
             patch.object(pvr, "_submit_email"),
             patch.object(pvr, "_submit_email_otp"),
-            patch.object(pvr, "grizzly_verify_phone",
-                         return_value={"activation_id": 1, "phone": "6391", "code": "1234", "attempts": 1}),
+            patch.object(pvr, "verify_phone_with_fallback",
+                         return_value={"activation_id": 1, "phone": "6391", "code": "1234",
+                                       "attempts": 1, "provider": "grizzly"}),
             patch.object(pvr, "_select_workspace_and_get_callback", return_value="cb://?code=xyz&state=s"),
             patch.object(pvr, "_extract_code", return_value="auth-code-1"),
             patch.object(pvr, "exchange_codex_token",

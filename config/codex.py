@@ -131,10 +131,28 @@ SMS_REQUEST_TIMEOUT: int = 30
 
 # ── 解码保号（AT→refresh_token）────────────────────────────────────────
 # 注册成功后是否自动跑 phone_verify_refresh：
-#   AT → GrizzlySMS 接码 → Codex OAuth → refresh_token + CPA 兼容凭证
+#   AT → 接码 → Codex OAuth → refresh_token + CPA 兼容凭证
 #   （codex_accounts/codex-{email}.json，可直接导入 CPA/CLIProxyAPI 长期使用）
 # 默认 False：不调用、不产生任何接码费用。仅当用户明确说"解码保号"时才置 true。
 REFRESH_DECODE_ENABLED: bool = False
+
+# 解码保号的接码平台尝试顺序，逗号分隔，形如 "grizzly,hero:4,hero:187"。
+# 冒号后是该次尝试用的 hero 国家码（grizzly 忽略）。
+# 某一家返回 NO_BALANCE / 无号 / 重试耗尽时自动换下一家，全部失败才算失败。
+#
+# 实测（2026-08-13）：
+#   - Grizzly 余额 $0.03 见底，永远 NO_BALANCE
+#   - HeroSMS dr(OpenAI) 实体号价目：4 菲律宾 $0.0275、16 英国 $0.0413、
+#     6 印尼/73 巴西 $0.0495、187 美国 $0.605
+#   - 美国 187 号实测被 OpenAI add-phone 以 `fraud_guard`（"suspicious behavior
+#     from phone numbers similar to yours"）拒收，且取号即扣费 $0.605 —— 换号
+#     成本极高。因此便宜的实体号国家排前面，美国放最后兜底。
+REFRESH_DECODE_SMS_PROVIDERS: str = "grizzly,hero:4,hero:16,hero:6,hero:73,hero:187"
+
+# hero 分支的服务码/默认国家/限价（覆盖 config/plus.py 的 GCash 默认值）
+REFRESH_DECODE_HERO_SERVICE: str = "dr"
+REFRESH_DECODE_HERO_COUNTRY: int = 4
+REFRESH_DECODE_HERO_MAX_PRICE: float = 0.0
 
 
 # ============================================================
@@ -171,4 +189,4 @@ L_ADMIN_AUTH_CODE: str = env_str("L_ADMIN_AUTH_CODE", "")
 L_PHONE_PREFIX: str = ""
 
 # ---- .env overrides for WebUI editable fields ----
-apply_env_overrides(globals(), {'ENABLE_CODEX_AUTO': 'bool', 'CODEX_OAUTH_DRIVER': 'str', 'CODEX_AUTH_URL_SOURCE': 'str', 'CPA_MANAGEMENT_URL': 'str', 'CPA_MANAGEMENT_KEY': 'str', 'CPA_REQUEST_TIMEOUT': 'int', 'CPA_SAVE_CALLBACK_RECEIPT': 'bool', 'SMS_PROVIDER': 'str', 'SMS_COUNTRY': 'str', 'SMS_SERVICE': 'str', 'SMS_MAX_RETRIES': 'int', 'SMS_CODE_WAIT': 'int', 'SMS_API_KEY': 'str', 'REFRESH_DECODE_ENABLED': 'bool', 'H_API_BASE': 'str', 'H_ADMIN_AUTH_CODE': 'str', 'H_PHONE_PREFIX': 'str', 'H_PHONE_ACQUIRE_MODE': 'str', 'L_API_BASE': 'str', 'L_ADMIN_AUTH_CODE': 'str', 'L_PHONE_PREFIX': 'str'})
+apply_env_overrides(globals(), {'ENABLE_CODEX_AUTO': 'bool', 'CODEX_OAUTH_DRIVER': 'str', 'CODEX_AUTH_URL_SOURCE': 'str', 'CPA_MANAGEMENT_URL': 'str', 'CPA_MANAGEMENT_KEY': 'str', 'CPA_REQUEST_TIMEOUT': 'int', 'CPA_SAVE_CALLBACK_RECEIPT': 'bool', 'SMS_PROVIDER': 'str', 'SMS_COUNTRY': 'str', 'SMS_SERVICE': 'str', 'SMS_MAX_RETRIES': 'int', 'SMS_CODE_WAIT': 'int', 'SMS_API_KEY': 'str', 'REFRESH_DECODE_ENABLED': 'bool', 'REFRESH_DECODE_SMS_PROVIDERS': 'str', 'REFRESH_DECODE_HERO_SERVICE': 'str', 'REFRESH_DECODE_HERO_COUNTRY': 'int', 'REFRESH_DECODE_HERO_MAX_PRICE': 'float', 'H_API_BASE': 'str', 'H_ADMIN_AUTH_CODE': 'str', 'H_PHONE_PREFIX': 'str', 'H_PHONE_ACQUIRE_MODE': 'str', 'L_API_BASE': 'str', 'L_ADMIN_AUTH_CODE': 'str', 'L_PHONE_PREFIX': 'str'})
