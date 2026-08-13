@@ -154,6 +154,11 @@ REFRESH_DECODE_HERO_SERVICE: str = "dr"
 REFRESH_DECODE_HERO_COUNTRY: int = 4
 REFRESH_DECODE_HERO_MAX_PRICE: float = 0.0
 
+# 解码保号前的 AT 在线校验重试次数。resin 池里同一 sid 会粘住某个上游节点，
+# 实测 api/chatgpt 可达率只有一部分（Pokemon ~85%，Premium ~10%），
+# CONNECT tunnel failed / SSL EOF 这类网络错不代表 token 死了 → 换 sid 重试。
+REFRESH_DECODE_ALIVE_CHECK_ATTEMPTS: int = 4
+
 
 # ============================================================
 # H 取号服务（SMS_PROVIDER="h" 时使用）
@@ -189,4 +194,4 @@ L_ADMIN_AUTH_CODE: str = env_str("L_ADMIN_AUTH_CODE", "")
 L_PHONE_PREFIX: str = ""
 
 # ---- .env overrides for WebUI editable fields ----
-apply_env_overrides(globals(), {'ENABLE_CODEX_AUTO': 'bool', 'CODEX_OAUTH_DRIVER': 'str', 'CODEX_AUTH_URL_SOURCE': 'str', 'CPA_MANAGEMENT_URL': 'str', 'CPA_MANAGEMENT_KEY': 'str', 'CPA_REQUEST_TIMEOUT': 'int', 'CPA_SAVE_CALLBACK_RECEIPT': 'bool', 'SMS_PROVIDER': 'str', 'SMS_COUNTRY': 'str', 'SMS_SERVICE': 'str', 'SMS_MAX_RETRIES': 'int', 'SMS_CODE_WAIT': 'int', 'SMS_API_KEY': 'str', 'REFRESH_DECODE_ENABLED': 'bool', 'REFRESH_DECODE_SMS_PROVIDERS': 'str', 'REFRESH_DECODE_HERO_SERVICE': 'str', 'REFRESH_DECODE_HERO_COUNTRY': 'int', 'REFRESH_DECODE_HERO_MAX_PRICE': 'float', 'H_API_BASE': 'str', 'H_ADMIN_AUTH_CODE': 'str', 'H_PHONE_PREFIX': 'str', 'H_PHONE_ACQUIRE_MODE': 'str', 'L_API_BASE': 'str', 'L_ADMIN_AUTH_CODE': 'str', 'L_PHONE_PREFIX': 'str'})
+apply_env_overrides(globals(), {'ENABLE_CODEX_AUTO': 'bool', 'CODEX_OAUTH_DRIVER': 'str', 'CODEX_AUTH_URL_SOURCE': 'str', 'CPA_MANAGEMENT_URL': 'str', 'CPA_MANAGEMENT_KEY': 'str', 'CPA_REQUEST_TIMEOUT': 'int', 'CPA_SAVE_CALLBACK_RECEIPT': 'bool', 'SMS_PROVIDER': 'str', 'SMS_COUNTRY': 'str', 'SMS_SERVICE': 'str', 'SMS_MAX_RETRIES': 'int', 'SMS_CODE_WAIT': 'int', 'SMS_API_KEY': 'str', 'REFRESH_DECODE_ENABLED': 'bool', 'REFRESH_DECODE_SMS_PROVIDERS': 'str', 'REFRESH_DECODE_HERO_SERVICE': 'str', 'REFRESH_DECODE_HERO_COUNTRY': 'int', 'REFRESH_DECODE_HERO_MAX_PRICE': 'float', 'REFRESH_DECODE_ALIVE_CHECK_ATTEMPTS': 'int', 'H_API_BASE': 'str', 'H_ADMIN_AUTH_CODE': 'str', 'H_PHONE_PREFIX': 'str', 'H_PHONE_ACQUIRE_MODE': 'str', 'L_API_BASE': 'str', 'L_ADMIN_AUTH_CODE': 'str', 'L_PHONE_PREFIX': 'str'})

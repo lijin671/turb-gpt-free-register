@@ -185,15 +185,42 @@ def resolve_account_from_token(access_token: str) -> dict:
 # ============================================================
 
 def check_account_alive(access_token: str, proxy: str | None = None) -> dict:
-    """借套餐检测链路（accounts/check）确认 AT 在线可用。失败抛错，避免白烧接码费用。"""
-    result = check_account_plan(access_token, proxy=proxy)
-    if not result.get("ok"):
-        raise PhoneVerifyRefreshError(
-            f"accessToken 在线校验失败: {result.get('error')} "
-            f"(http={result.get('http_status')})"
+    """借套餐检测链路（accounts/check）确认 AT 在线可用。失败抛错，避免白烧接码费用。
+
+    出口脏（CONNECT tunnel failed / SSL EOF / 5xx）不代表 token 死了：
+    resin 池里同一 sid 会粘住某个上游节点，实测可达率只有一部分。
+    因此网络类错误换新 sid 重试，只有拿到明确的鉴权答复（401/403 等）
+    才判定 token 不可用。
+    """
+    attempts = max(1, int(getattr(_codex_cfg, "REFRESH_DECODE_ALIVE_CHECK_ATTEMPTS", 4) or 4))
+    from config.proxy import pick_proxy
+
+    last_error = ""
+    last_http = None
+    for attempt in range(1, attempts + 1):
+        # proxy 显式传入时只在重试时换 sid；未传入时每轮都抽新出口
+        effective = proxy if (proxy and attempt == 1) else (pick_proxy() or proxy)
+        result = check_account_plan(access_token, proxy=effective)
+        if result.get("ok"):
+            logger.info(
+                f"[校验] accessToken 在线有效，plan={result.get('plan_type') or 'unknown'}"
+                + (f"（第 {attempt} 次尝试）" if attempt > 1 else "")
+            )
+            return result
+
+        last_error = str(result.get("error") or "")
+        last_http = result.get("http_status")
+        if last_http is not None:
+            # 服务端给了明确答复 → token 状态已确定，不必再换出口
+            break
+        logger.warning(
+            f"[校验] 第 {attempt}/{attempts} 次网络失败（出口疑似脏），换出口重试："
+            f"{last_error[:120]}"
         )
-    logger.info(f"[校验] accessToken 在线有效，plan={result.get('plan_type') or 'unknown'}")
-    return result
+
+    raise PhoneVerifyRefreshError(
+        f"accessToken 在线校验失败: {last_error} (http={last_http})"
+    )
 
 
 # ============================================================

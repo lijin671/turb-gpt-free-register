@@ -171,5 +171,47 @@ class RunPhoneVerifyRefreshTest(unittest.TestCase):
         self.assertIn("network down", out["error"])
 
 
+class CheckAccountAliveRetryTest(unittest.TestCase):
+    """出口脏（http_status=None）换 sid 重试；服务端明确答复则立即停。"""
+
+    def test_network_error_retries_then_succeeds(self):
+        calls = []
+
+        def fake_check(token, proxy=None):
+            calls.append(proxy)
+            if len(calls) < 3:
+                return {"ok": False, "http_status": None, "error": "CONNECT tunnel failed 504"}
+            return {"ok": True, "plan_type": "free"}
+
+        with patch.object(pvr, "check_account_plan", side_effect=fake_check), \
+             patch("config.proxy.pick_proxy", side_effect=lambda: "http://p%d@127.0.0.1:2260" % len(calls)):
+            out = pvr.check_account_alive("at-x", proxy="http://first@127.0.0.1:2260")
+        self.assertTrue(out["ok"])
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(calls[0], "http://first@127.0.0.1:2260")
+        self.assertNotEqual(calls[1], calls[0])
+
+    def test_definitive_http_status_stops_immediately(self):
+        calls = []
+
+        def fake_check(token, proxy=None):
+            calls.append(proxy)
+            return {"ok": False, "http_status": 401, "error": "token_invalidated"}
+
+        with patch.object(pvr, "check_account_plan", side_effect=fake_check), \
+             patch("config.proxy.pick_proxy", return_value="http://p@127.0.0.1:2260"):
+            with self.assertRaises(pvr.PhoneVerifyRefreshError) as ctx:
+                pvr.check_account_alive("at-x")
+        self.assertEqual(len(calls), 1)
+        self.assertIn("401", str(ctx.exception))
+
+    def test_all_network_attempts_fail_raises(self):
+        with patch.object(pvr, "check_account_plan",
+                          return_value={"ok": False, "http_status": None, "error": "SSL EOF"}), \
+             patch("config.proxy.pick_proxy", return_value="http://p@127.0.0.1:2260"):
+            with self.assertRaises(pvr.PhoneVerifyRefreshError):
+                pvr.check_account_alive("at-x")
+
+
 if __name__ == "__main__":
     unittest.main()
