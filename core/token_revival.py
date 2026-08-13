@@ -136,6 +136,8 @@ def revive_account(email: str, otp_code: str | None = None, *, session=None, ret
         human_delay("navigate")
 
         if otp_code is None:
+            # manymail 凭据（用于 Playwright 回退时收 OTP）
+            manymail_creds = None
             # 恢复 manymail 进程内上下文（独立进程时 _CONTEXT_CACHE 为空）
             try:
                 from core.email_provider import resolve_email_source
@@ -151,6 +153,7 @@ def revive_account(email: str, otp_code: str | None = None, *, session=None, ret
                         # manymail 凭据存在 extra['manymail']['password']
                         mm_creds = extra.get("manymail", {})
                         password = mm_creds.get("password", "") if isinstance(mm_creds, dict) else ""
+                        manymail_creds = mm_creds if isinstance(mm_creds, dict) else None
                         if password:
                             restore_context(email, password=password)
                             logger.info("[复活] 已恢复 manymail 上下文: %s", email)
@@ -265,7 +268,55 @@ def revive_account(email: str, otp_code: str | None = None, *, session=None, ret
                 except Exception as fs_exc:
                     logger.warning("[复活] %s FlareSolverr 模式异常: %s: %s", email, type(fs_exc).__name__, fs_exc)
 
-                # FlareSolverr 失败后换代理重试
+                # FlareSolverr 失败后尝试 Playwright 方式（真实 Chrome 过 CF + JS fetch POST）
+                try:
+                    from core.playwright_revive import playwright_revive_account as _pw_revive
+                    logger.info("[复活] %s 尝试 Playwright 方式（真实 Chrome + JS fetch）...", email)
+                    pw_result = _pw_revive(
+                        email=email,
+                        proxy=proxy,
+                        device_id=device_id,
+                        manymail_creds=manymail_creds,
+                        timeout=120,
+                    )
+                    if pw_result.get("ok"):
+                        new_token = pw_result.get("access_token", "")
+                        logger.info("[复活] %s ✅ Playwright 模式成功", email)
+                        db.update_account_access_token(email, new_token, note="Playwright 复活成功")
+                        reexport = False
+                        reimport = False
+                        try:
+                            from config.export import AUTO_REEXPORT_AFTER_REVIVE, AUTO_REIMPORT_AFTER_REVIVE
+                            reexport = AUTO_REEXPORT_AFTER_REVIVE
+                            reimport = AUTO_REIMPORT_AFTER_REVIVE
+                        except Exception:
+                            pass
+                        if reexport:
+                            try:
+                                from core.chatgpt2api_export import export_account_to_chatgpt2api
+                                export_account_to_chatgpt2api(email=email, access_token=new_token)
+                            except Exception:
+                                pass
+                        if reimport:
+                            try:
+                                from core.cpa_manager_import import import_single_account
+                                from config.export import CPA_MANAGER_PLUS_BASE, CPA_MANAGER_PLUS_KEY
+                                import_single_account(email=email, access_token=new_token,
+                                    base=CPA_MANAGER_PLUS_BASE, key=CPA_MANAGER_PLUS_KEY)
+                            except Exception:
+                                pass
+                        return {
+                            "ok": True, "email": email,
+                            "access_token": new_token,
+                            "reexport": reexport, "reimport": reimport,
+                            "message": "Playwright 模式复活成功",
+                        }
+                    else:
+                        logger.warning("[复活] %s Playwright 模式失败: %s", email, pw_result.get("message", ""))
+                except Exception as pw_exc:
+                    logger.warning("[复活] %s Playwright 模式异常: %s: %s", email, type(pw_exc).__name__, pw_exc)
+
+                # Playwright 也失败后换代理重试
                 if retry_count < 2:
                     logger.warning("[复活] %s 失败（%s），换代理重试 (%d/2)...", email, type(exc).__name__, retry_count + 1)
                     if own_session:
