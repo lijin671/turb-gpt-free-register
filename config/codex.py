@@ -140,14 +140,17 @@ REFRESH_DECODE_ENABLED: bool = False
 # 冒号后是该次尝试用的 hero 国家码（grizzly 忽略）。
 # 某一家返回 NO_BALANCE / 无号 / 重试耗尽时自动换下一家，全部失败才算失败。
 #
-# 实测（2026-08-13）：
-#   - Grizzly 余额 $0.03 见底，永远 NO_BALANCE
-#   - HeroSMS dr(OpenAI) 实体号价目：4 菲律宾 $0.0275、16 英国 $0.0413、
-#     6 印尼/73 巴西 $0.0495、187 美国 $0.605
-#   - 美国 187 号实测被 OpenAI add-phone 以 `fraud_guard`（"suspicious behavior
-#     from phone numbers similar to yours"）拒收，且取号即扣费 $0.605 —— 换号
-#     成本极高。因此便宜的实体号国家排前面，美国放最后兜底。
-REFRESH_DECODE_SMS_PROVIDERS: str = "grizzly,hero:4,hero:16,hero:6,hero:73,hero:187"
+# 实测（2026-08-13，跑真号验证）：
+#   - Grizzly：余额 $0.03 见底，永远 NO_BALANCE。充值 ≥$2 后是唯一可行平台
+#     （08-08 用它连产 12 个号，美国实体号 $0.13/个，秒到码）。
+#   - HeroSMS：余额 $1.00，dr(OpenAI) 号池很大（菲律宾 4 $0.0275、英国 16
+#     $0.0413、印尼 6/巴西 73 $0.0495、美国 187 $0.605），但**每个号都被
+#     OpenAI add-phone 拒收**：`fraud_guard`（"suspicious behavior from phone
+#     numbers similar to yours"）或 `phone_number_in_use`。菲律宾/英国/美国
+#     各试 2-3 号全灭。号会退款（成本≈0），但每号白耗 2-3 分钟。
+#     → 因此默认**不**把 hero 放进 plan，避免拖慢 cron 批量注册。
+#     风控放松或换号商后想重新启用：改成 "grizzly,hero:4,hero:16,hero:187"。
+REFRESH_DECODE_SMS_PROVIDERS: str = "grizzly"
 
 # hero 分支的服务码/默认国家/限价（覆盖 config/plus.py 的 GCash 默认值）
 REFRESH_DECODE_HERO_SERVICE: str = "dr"
