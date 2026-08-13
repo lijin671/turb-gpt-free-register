@@ -265,20 +265,64 @@ async def _playwright_revive_account(
 
             logger.info(f"[PW-Revive] {email} ✅ validate 成功, continue_url={continue_url[:80]}")
 
-            # Step 6: 跟随 continue_url → 获取 session
-            logger.info(f"[PW-Revive] {email} Step 5: 跟随 continue_url...")
-            try:
-                await page.goto(continue_url, wait_until="domcontentloaded", timeout=15000)
-            except:
-                pass  # 可能重定向到 chatgpt.com，忽略超时
+            # Step 6: 用 OAuth token 端点换取 access_token
+            # continue_url 中包含 code 参数，用 PKCE code_verifier 换 token
+            logger.info(f"[PW-Revive] {email} Step 5: 用 OAuth code 换 token...")
 
-            # 获取 session
+            from urllib.parse import urlparse, parse_qs
+            parsed = urlparse(continue_url)
+            qs = parse_qs(parsed.query)
+            auth_code = qs.get("code", [""])[0]
+
+            if not auth_code:
+                return {"ok": False, "email": email, "message": f"continue_url 中无 code: {continue_url[:200]}"}
+
+            logger.info(f"[PW-Revive] {email} OAuth code: {auth_code[:40]}...")
+
+            # 方案 A: POST auth.openai.com/oauth/token
+            token_resp = await context.request.post(
+                "https://auth.openai.com/oauth/token",
+                data={
+                    "grant_type": "authorization_code",
+                    "code": auth_code,
+                    "code_verifier": code_verifier,
+                    "redirect_uri": OPENAI_REDIRECT_URI,
+                    "client_id": OPENAI_CLIENT_ID,
+                },
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Origin": "https://chatgpt.com",
+                },
+                timeout=15000,
+            )
+            token_status = token_resp.status
+            token_body = await token_resp.text()
+            logger.info(f"[PW-Revive] {email} oauth/token: status={token_status}, body={token_body[:300]}")
+
+            if token_status == 200:
+                token_data = json.loads(token_body)
+                access_token = token_data.get("access_token", "")
+                if access_token:
+                    logger.info(f"[PW-Revive] {email} ✅✅✅ 获取 access_token: {access_token[:40]}...")
+                    return {
+                        "ok": True,
+                        "email": email,
+                        "message": "Playwright OAuth token 复活成功",
+                        "access_token": access_token,
+                    }
+
+            # 方案 B: 用 page.goto 跟随 continue_url（让 Chrome 过 chatgpt.com CF）
+            logger.info(f"[PW-Revive] {email} oauth/token 失败, 尝试 page.goto continue_url...")
+            try:
+                await page.goto(continue_url, wait_until="domcontentloaded", timeout=20000)
+            except:
+                pass
+
+            # 用 page.evaluate 在 chatgpt.com 上获取 session
             session_result = await page.evaluate("""
                 async () => {
                     try {
-                        const resp = await fetch('https://auth.openai.com/api/auth/session', {
-                            credentials: 'include'
-                        });
+                        const resp = await fetch('/api/auth/session', {credentials: 'include'});
                         const text = await resp.text();
                         return {status: resp.status, body: text};
                     } catch(e) {
@@ -286,6 +330,7 @@ async def _playwright_revive_account(
                     }
                 }
             """)
+            logger.info(f"[PW-Revive] {email} session (JS fetch): {json.dumps(session_result, ensure_ascii=False)[:200]}")
 
             if session_result.get("status") == 200:
                 session_data = json.loads(session_result.get("body", "{}"))
