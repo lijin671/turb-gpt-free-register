@@ -18,6 +18,36 @@ from urllib.parse import urlencode, urlparse
 
 logger = logging.getLogger(__name__)
 
+
+def _extract_json_from_html(text: str) -> dict | None:
+    """从 FlareSolverr 返回的 HTML 中提取 JSON。
+
+    FlareSolverr 的 Chrome 有时把 JSON 响应包裹在 HTML <pre> 标签中：
+    <html><head>...</head><body><pre>{"key":"value"}</pre></body></html>
+    """
+    import re
+    # 尝试直接 JSON 解析
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        pass
+    # 从 <pre> 标签中提取
+    match = re.search(r'<pre>(.*?)</pre>', text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group(1))
+        except (json.JSONDecodeError, TypeError):
+            pass
+    # 尝试找到第一个 { 到最后一个 } 的内容
+    first = text.find('{')
+    last = text.rfind('}')
+    if first >= 0 and last > first:
+        try:
+            return json.loads(text[first:last+1])
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return None
+
 _FLARESOLVERR_URL = os.environ.get("FLARESOLVERR_URL", "http://127.0.0.1:18191").rstrip("/")
 _FLARESOLVERR_TIMEOUT = int(os.environ.get("FLARESOLVERR_TIMEOUT", "60"))
 
@@ -158,12 +188,10 @@ def flaresolverr_revive_account(email: str, proxy: str = "", device_id: str = ""
         landing_url = sol.get("url", "")
         logger.info("[FS-Revive] %s POST validate 落点: %s, status: %s", email, landing_url[:80], sol.get("status"))
 
-        # 解析 JSON 响应
-        try:
-            resp_data = json.loads(response_text)
-        except json.JSONDecodeError:
-            # 可能是 HTML（重定向页面）
-            return {"ok": False, "email": email, "message": f"validate 响应非 JSON: {response_text[:100]}"}
+        # 解析 JSON 响应（FlareSolverr 可能把 JSON 包裹在 HTML <pre> 标签中）
+        resp_data = _extract_json_from_html(response_text)
+        if resp_data is None:
+            return {"ok": False, "email": email, "message": f"validate 响应无法解析为 JSON: {response_text[:100]}"}
 
         if resp_data.get("error"):
             err_code = resp_data["error"].get("code", "")
@@ -200,10 +228,9 @@ def flaresolverr_revive_account(email: str, proxy: str = "", device_id: str = ""
             return {"ok": False, "email": email, "message": "FlareSolverr GET session 失败"}
 
         response_text = sol.get("response", "")
-        try:
-            session_data = json.loads(response_text)
-        except json.JSONDecodeError:
-            return {"ok": False, "email": email, "message": f"session 响应非 JSON: {response_text[:100]}"}
+        session_data = _extract_json_from_html(response_text)
+        if session_data is None:
+            return {"ok": False, "email": email, "message": f"session 响应无法解析为 JSON: {response_text[:100]}"}
 
         new_token = session_data.get("accessToken", "")
         if not new_token:

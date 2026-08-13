@@ -48,7 +48,42 @@ def revive_account(email: str, otp_code: str | None = None, *, session=None, ret
     from core.humanize import delay as human_delay
 
     own_session = session is None
-    session = session or BrowserSession(proxy=proxy, detect_exit_geo=False, device_id=device_id or None)
+    # 使用 chrome131 impersonate — chrome146 的 POST TLS 指纹被 auth.openai.com CF 403
+    from config.browser import IMPERSONATE as _default_imp
+    _revive_impersonate = "chrome131" if _default_imp == "chrome146" else _default_imp
+    if session is None:
+        session = BrowserSession(proxy=proxy, detect_exit_geo=False, device_id=device_id or None)
+        # 覆盖 impersonate 为 chrome131 — chrome146 的 POST TLS 指纹被 auth.openai.com CF 403
+        if _revive_impersonate != _default_imp:
+            from curl_cffi.requests import Session as _CurlSession
+            old_cookies = dict(session.session.cookies) if hasattr(session.session, 'cookies') else {}
+            old_timeout = getattr(session.session, 'timeout', 30)
+            session.session = _CurlSession(impersonate=_revive_impersonate)
+            session.session.proxies = {"http": proxy, "https": proxy} if proxy else {}
+            session.session.timeout = old_timeout
+            # 恢复 cookies（oai-did 等）
+            for name, value in old_cookies.items():
+                try:
+                    session.session.cookies.set(name, value)
+                except Exception:
+                    pass
+            # 重新设置 oai-did cookie
+            if device_id:
+                for domain in [".auth.openai.com", ".chatgpt.com", ".openai.com"]:
+                    session.session.cookies.set("oai-did", device_id, domain=domain, path="/")
+            # 更新 browser_profile 中的 UA 以匹配 chrome131（避免 TLS 指纹和 UA 不匹配被 CF 检测）
+            # chrome131 对应 Chrome 131，让 curl_cffi 自动设置 UA（不覆盖）
+            if hasattr(session, "browser_profile") and isinstance(session.browser_profile, dict):
+                # 设置 chrome131 对应的 UA 和 sec-ch-ua（避免 TLS 指纹和 UA 不匹配被 CF 检测）
+                session.browser_profile["user_agent"] = (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/131.0.0.0 Safari/537.36"
+                )
+                session.browser_profile["send_client_hints"] = True
+                session.browser_profile["sec_ch_ua"] = '"Google Chrome";v="131", "Chromium";v="131", "Not)A;Brand";v="24"'
+                session.browser_profile["sec_ch_ua_mobile"] = "?0"
+                session.browser_profile["sec_ch_ua_platform"] = '"macOS"' 
 
     # 预检 auth.openai.com 可达性 — 如果 CF 403 则换代理（和注册流程 network_preflight 一致）
     for _ in range(3):
@@ -72,7 +107,6 @@ def revive_account(email: str, otp_code: str | None = None, *, session=None, ret
                 session.proxy = new_proxy
                 session.session.proxies = {"http": new_proxy, "https": new_proxy}
                 logger.info("[复活] 换代理: %s...", new_proxy[:50])
-            else:
                 break
         except Exception as pf_exc:
             logger.warning("[复活] 预检失败: %s，换代理重试...", pf_exc)
@@ -86,7 +120,6 @@ def revive_account(email: str, otp_code: str | None = None, *, session=None, ret
                 session.proxy = new_proxy
                 session.session.proxies = {"http": new_proxy, "https": new_proxy}
                 logger.info("[复活] 换代理: %s...", new_proxy[:50])
-            else:
                 break
 
     try:
