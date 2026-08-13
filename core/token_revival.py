@@ -220,9 +220,11 @@ def revive_account(email: str, otp_code: str | None = None, *, session=None, ret
     except Exception as exc:
         exc_str = str(exc)
         # 如果是 CF 403 / 连接超时 / 409，尝试 FlareSolverr session 模式
-        if ("403" in exc_str or "409" in exc_str or "timeout" in exc_str.lower() or 
-            "CONNECT tunnel failed" in exc_str or "504" in exc_str):
-            if retry_count < 1:
+        if ("403" in exc_str or "409" in exc_str or "timeout" in exc_str.lower() or
+            "CONNECT tunnel failed" in exc_str or "504" in exc_str or
+            "SSL" in exc_str or "Connection closed" in exc_str or
+            "Connection reset" in exc_str or "EOF" in exc_str):
+            if retry_count < 2:
                 # 先尝试 FlareSolverr session 模式（真实 Chrome 过 CF）
                 logger.info("[复活] %s curl_cffi 失败（%s），尝试 FlareSolverr session 模式...", email, type(exc).__name__)
                 try:
